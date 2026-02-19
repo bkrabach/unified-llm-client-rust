@@ -1196,3 +1196,356 @@ async fn compliance_stream_object_gemini() {
     assert_eq!(final_obj["age"], 30);
     dod_pass("stream_object/gemini");
 }
+
+// ---------------------------------------------------------------------------
+// §8.6.9 — Multi-turn prompt caching × Anthropic (real API)
+//
+// Runs 6 conversation turns with a large system prompt to maximize cache hit
+// potential. Logs cache metrics but does NOT assert a specific threshold —
+// cache hit rates depend on Anthropic's server-side behavior and timing.
+// The wiremock test (conformance.rs) validates field parsing; this test
+// validates the real multi-turn flow.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_6_9_multi_turn_caching_anthropic() {
+    use unified_llm_types::Message;
+
+    let client = require_client();
+    // Use a large system prompt to maximize cache hit potential
+    let system_text = "You are a helpful assistant. ".repeat(100); // ~2600 chars
+    let mut messages = vec![Message::system(&system_text)];
+
+    for turn in 1..=6 {
+        messages.push(Message::user(format!(
+            "Turn {turn}: What is {turn} + {turn}?"
+        )));
+        let result = with_compliance_retry(3, 2, || {
+            let opts = GenerateOptions::new(ANTHROPIC_MODEL)
+                .messages(messages.clone())
+                .max_tokens(100)
+                .provider("anthropic");
+            let client = &client;
+            async move { unified_llm::generate(opts, client).await }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("Turn {turn} failed: {e:?}"));
+
+        messages.push(Message::assistant(&result.text));
+
+        if turn >= 5 {
+            let cache_read = result.usage.cache_read_tokens.unwrap_or(0);
+            let input = result.usage.input_tokens;
+            // Log cache metrics for observability — no threshold assertion
+            eprintln!(
+                "[CACHE] Turn {turn}: cache_read={cache_read}, input={input}, ratio={:.1}%",
+                if input > 0 {
+                    cache_read as f64 / input as f64 * 100.0
+                } else {
+                    0.0
+                }
+            );
+        }
+    }
+    dod_pass("8.6.9/anthropic");
+}
+
+// ---------------------------------------------------------------------------
+// §8.9.3 — Image input (base64) × 3 providers
+// ---------------------------------------------------------------------------
+
+/// Minimal 1x1 red PNG as base64.
+const TINY_PNG_B64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
+
+fn decode_tiny_png() -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(TINY_PNG_B64)
+        .expect("Valid base64")
+}
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_3_image_base64_openai() {
+    use unified_llm_types::{ContentPart, Message, Role};
+
+    let client = require_client();
+    let png_bytes = decode_tiny_png();
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentPart::text("What color is this image? Answer in one word."),
+            ContentPart::image_bytes(png_bytes, "image/png"),
+        ],
+        name: None,
+        tool_call_id: None,
+    }];
+
+    let result = with_compliance_retry(3, 2, || {
+        let msgs = messages.clone();
+        let client = &client;
+        async move {
+            unified_llm::generate(
+                GenerateOptions::new(OPENAI_MODEL)
+                    .messages(msgs)
+                    .max_tokens(50)
+                    .provider("openai"),
+                client,
+            )
+            .await
+        }
+    })
+    .await
+    .expect("Image base64 openai failed");
+
+    assert!(!result.text.is_empty(), "openai: should respond to image");
+    dod_pass("8.9.3/openai");
+}
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_3_image_base64_anthropic() {
+    use unified_llm_types::{ContentPart, Message, Role};
+
+    let client = require_client();
+    let png_bytes = decode_tiny_png();
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentPart::text("What color is this image? Answer in one word."),
+            ContentPart::image_bytes(png_bytes, "image/png"),
+        ],
+        name: None,
+        tool_call_id: None,
+    }];
+
+    let result = with_compliance_retry(3, 2, || {
+        let msgs = messages.clone();
+        let client = &client;
+        async move {
+            unified_llm::generate(
+                GenerateOptions::new(ANTHROPIC_MODEL)
+                    .messages(msgs)
+                    .max_tokens(50)
+                    .provider("anthropic"),
+                client,
+            )
+            .await
+        }
+    })
+    .await
+    .expect("Image base64 anthropic failed");
+
+    assert!(
+        !result.text.is_empty(),
+        "anthropic: should respond to image"
+    );
+    dod_pass("8.9.3/anthropic");
+}
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_3_image_base64_gemini() {
+    use unified_llm_types::{ContentPart, Message, Role};
+
+    let client = require_client();
+    let png_bytes = decode_tiny_png();
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentPart::text("What color is this image? Answer in one word."),
+            ContentPart::image_bytes(png_bytes, "image/png"),
+        ],
+        name: None,
+        tool_call_id: None,
+    }];
+
+    let result = with_compliance_retry(3, 2, || {
+        let msgs = messages.clone();
+        let client = &client;
+        async move {
+            unified_llm::generate(
+                GenerateOptions::new(GEMINI_MODEL)
+                    .messages(msgs)
+                    .max_tokens(50)
+                    .provider("gemini"),
+                client,
+            )
+            .await
+        }
+    })
+    .await
+    .expect("Image base64 gemini failed");
+
+    assert!(!result.text.is_empty(), "gemini: should respond to image");
+    dod_pass("8.9.3/gemini");
+}
+
+// ---------------------------------------------------------------------------
+// §8.9.7 — Multi-step tool loop (3+ rounds) × 3 providers
+// ---------------------------------------------------------------------------
+
+/// Build a counting tool handler closure.
+fn count_step_handler(
+    args: serde_json::Value,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<serde_json::Value, unified_llm::Error>> + Send>,
+> {
+    Box::pin(async move {
+        let step = args["step"].as_i64().unwrap_or(0);
+        Ok(serde_json::json!({
+            "result": format!("Step {} complete", step),
+            "next_step": step + 1
+        }))
+    })
+}
+
+fn make_count_step_tool() -> unified_llm::api::types::Tool {
+    unified_llm::api::types::Tool::active(
+        "count_step",
+        "Returns the current step number. Call with step=1, then step=2, then step=3.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "step": { "type": "integer", "description": "The step number to execute" }
+            },
+            "required": ["step"],
+            "additionalProperties": false
+        }),
+        count_step_handler,
+    )
+}
+
+fn make_count_step_tool_gemini() -> unified_llm::api::types::Tool {
+    unified_llm::api::types::Tool::active(
+        "count_step",
+        "Returns the current step number. Call with step=1, then step=2, then step=3.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "step": { "type": "integer", "description": "The step number to execute" }
+            },
+            "required": ["step"]
+        }),
+        count_step_handler,
+    )
+}
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_7_multi_step_tool_loop_openai() {
+    let client = require_client();
+    let result = with_compliance_retry(3, 2, || {
+        let opts = GenerateOptions::new(OPENAI_MODEL)
+            .prompt("Call the count_step tool 3 times: first with step=1, then step=2, then step=3. After all 3 calls, summarize the results.")
+            .tools(vec![make_count_step_tool()])
+            .max_tool_rounds(5)
+            .max_tokens(500)
+            .provider("openai");
+        let client = &client;
+        async move { unified_llm::generate(opts, client).await }
+    })
+    .await
+    .expect("Multi-step tool loop openai failed");
+
+    // Models may batch tool calls in parallel, so count total tool calls
+    // across all steps rather than requiring 3+ separate steps.
+    let total_tool_calls: usize = result.steps.iter().map(|s| s.tool_calls.len()).sum();
+    assert!(
+        total_tool_calls >= 3,
+        "openai: should have 3+ tool calls total, got {} across {} steps",
+        total_tool_calls,
+        result.steps.len()
+    );
+    dod_pass("8.9.7/openai");
+}
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_7_multi_step_tool_loop_anthropic() {
+    let client = require_client();
+    let result = with_compliance_retry(3, 2, || {
+        let opts = GenerateOptions::new(ANTHROPIC_MODEL)
+            .prompt("Call the count_step tool 3 times: first with step=1, then step=2, then step=3. After all 3 calls, summarize the results.")
+            .tools(vec![make_count_step_tool()])
+            .max_tool_rounds(5)
+            .max_tokens(500)
+            .provider("anthropic");
+        let client = &client;
+        async move { unified_llm::generate(opts, client).await }
+    })
+    .await
+    .expect("Multi-step tool loop anthropic failed");
+
+    let total_tool_calls: usize = result.steps.iter().map(|s| s.tool_calls.len()).sum();
+    assert!(
+        total_tool_calls >= 3,
+        "anthropic: should have 3+ tool calls total, got {} across {} steps",
+        total_tool_calls,
+        result.steps.len()
+    );
+    dod_pass("8.9.7/anthropic");
+}
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_7_multi_step_tool_loop_gemini() {
+    let client = require_client();
+    let result = with_compliance_retry(3, 2, || {
+        let opts = GenerateOptions::new(GEMINI_MODEL)
+            .prompt("Call the count_step tool 3 times: first with step=1, then step=2, then step=3. After all 3 calls, summarize the results.")
+            .tools(vec![make_count_step_tool_gemini()])
+            .max_tool_rounds(5)
+            .max_tokens(500)
+            .provider("gemini");
+        let client = &client;
+        async move { unified_llm::generate(opts, client).await }
+    })
+    .await
+    .expect("Multi-step tool loop gemini failed");
+
+    let total_tool_calls: usize = result.steps.iter().map(|s| s.tool_calls.len()).sum();
+    assert!(
+        total_tool_calls >= 3,
+        "gemini: should have 3+ tool calls total, got {} across {} steps",
+        total_tool_calls,
+        result.steps.len()
+    );
+    dod_pass("8.9.7/gemini");
+}
+
+// ---------------------------------------------------------------------------
+// §8.9.10 — Reasoning tokens × OpenAI (o4-mini)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_10_reasoning_tokens_openai() {
+    let client = require_client();
+    let result = with_compliance_retry(3, 2, || {
+        let opts = GenerateOptions::new("o4-mini")
+            .prompt("What is 2 + 2? Think step by step.")
+            .max_tokens(500)
+            .provider("openai")
+            .reasoning_effort("low");
+        let client = &client;
+        async move { unified_llm::generate(opts, client).await }
+    })
+    .await
+    .expect("Reasoning tokens test failed");
+
+    assert!(
+        result.usage.reasoning_tokens.is_some(),
+        "openai: should report reasoning_tokens"
+    );
+    assert!(
+        result.usage.reasoning_tokens.unwrap() > 0,
+        "openai: reasoning_tokens should be > 0"
+    );
+    dod_pass("8.9.10/openai");
+}

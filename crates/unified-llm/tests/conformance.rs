@@ -1762,7 +1762,11 @@ fn gemini_cached_response(
 }
 
 // ============================================================================
-// DoD 8.6.9 + 8.9.14: Multi-turn prompt caching via generate() (×3)
+// Cache token field parsing via generate() (×3)
+// These tests validate that cache_read_tokens are correctly extracted from
+// each provider's JSON response format. They are NOT real caching tests —
+// the cache_read values are baked into the wiremock responses.
+// Real multi-turn caching is tested in compliance_harness.rs (8.6.9).
 // ============================================================================
 
 async fn verify_multi_turn_caching(h: &ProviderTestHarness) {
@@ -1832,14 +1836,14 @@ async fn verify_multi_turn_caching(h: &ProviderTestHarness) {
 }
 
 #[tokio::test]
-async fn test_multi_turn_caching_anthropic() {
+async fn test_cache_token_field_parsing_anthropic() {
     verify_multi_turn_caching(&ProviderTestHarness::anthropic().await).await;
 }
 #[tokio::test]
-async fn test_multi_turn_caching_openai() {
+async fn test_cache_token_field_parsing_openai() {
     verify_multi_turn_caching(&ProviderTestHarness::openai().await).await;
 }
 #[tokio::test]
-async fn test_multi_turn_caching_gemini() {
+async fn test_cache_token_field_parsing_gemini() {
     verify_multi_turn_caching(&ProviderTestHarness::gemini().await).await;
 }
