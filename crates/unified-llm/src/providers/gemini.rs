@@ -491,7 +491,7 @@ pub fn translate_request(
                         // For request translation, we use the tool_call_id as the name
                         // since Gemini uses name-based routing.
                         // The caller should ensure tool_call_id maps to function name.
-                        let response_value = match &tool_result.content {
+                        let mut response_value = match &tool_result.content {
                             serde_json::Value::String(s) => {
                                 // Gemini expects object, not string — wrap in {"result": "..."}
                                 serde_json::json!({"result": s})
@@ -499,6 +499,15 @@ pub fn translate_request(
                             serde_json::Value::Object(_) => tool_result.content.clone(),
                             other => serde_json::json!({"result": other}),
                         };
+                        // Preserve is_error flag in the response object
+                        if tool_result.is_error {
+                            if let Some(obj) = response_value.as_object_mut() {
+                                obj.insert(
+                                    "is_error".to_string(),
+                                    serde_json::Value::Bool(true),
+                                );
+                            }
+                        }
                         let resolved_name = tool_call_map
                             .and_then(|m| m.get(&tool_result.tool_call_id))
                             .cloned()
@@ -562,11 +571,12 @@ pub fn translate_request(
     }
 
     // Thinking config from provider_options.gemini.thinkingConfig
+    // Must be at request root level, NOT inside generationConfig.
     if let Some(gemini_opts) =
         crate::util::provider_options::get_provider_options(&request.provider_options, "gemini")
     {
         if let Some(thinking_config) = gemini_opts.get("thinkingConfig") {
-            gen_config.insert("thinkingConfig".into(), thinking_config.clone());
+            body.insert("thinkingConfig".into(), thinking_config.clone());
         }
     }
 
@@ -631,6 +641,7 @@ pub fn translate_request(
 
         if !has_explicit_thinking {
             let level = match effort.as_str() {
+                "none" => "THINKING_BUDGET_NONE",
                 "low" => "LOW",
                 "medium" => "MEDIUM",
                 "high" => "HIGH",
@@ -1607,6 +1618,38 @@ mod tests {
         assert_eq!(fr["response"]["unit"], "F");
     }
 
+    #[test]
+    fn test_translate_request_tool_result_error_flag_preserved() {
+        // When a tool result has is_error: true, the error flag must be
+        // preserved in the Gemini functionResponse format.
+        let request = Request::default()
+            .model("gemini-2.0-flash")
+            .messages(vec![Message {
+                role: Role::Tool,
+                content: vec![ContentPart::ToolResult {
+                    tool_result: ToolResultData {
+                        tool_call_id: "get_weather".to_string(),
+                        content: serde_json::json!({"error": "City not found"}),
+                        is_error: true,
+                        image_data: None,
+                        image_media_type: None,
+                    },
+                }],
+                name: None,
+                tool_call_id: None,
+            }]);
+        let body = translate_request(&request, None);
+
+        let fr = &body["contents"][0]["parts"][0]["functionResponse"];
+        assert_eq!(fr["name"], "get_weather");
+        // The error flag must be present in the response
+        assert_eq!(
+            fr["response"]["is_error"], true,
+            "is_error flag must be preserved in functionResponse. Got: {}",
+            serde_json::to_string_pretty(&fr["response"]).unwrap()
+        );
+    }
+
     // === T05: Generation params ===
 
     #[test]
@@ -1659,9 +1702,16 @@ mod tests {
             })));
         let body = translate_request(&request, None);
 
-        let gc = &body["generationConfig"];
-        assert_eq!(gc["thinkingConfig"]["thinkingLevel"], "HIGH");
-        assert_eq!(gc["thinkingConfig"]["includeThoughts"], true);
+        // thinkingConfig must be at the request root, NOT inside generationConfig
+        assert_eq!(body["thinkingConfig"]["thinkingLevel"], "HIGH");
+        assert_eq!(body["thinkingConfig"]["includeThoughts"], true);
+        // Must NOT be nested inside generationConfig
+        assert!(
+            body.get("generationConfig")
+                .and_then(|gc| gc.get("thinkingConfig"))
+                .is_none(),
+            "thinkingConfig must NOT be inside generationConfig"
+        );
     }
 
     #[test]
@@ -1679,12 +1729,14 @@ mod tests {
 
         // safetySettings should be passed through
         assert!(body.get("safetySettings").is_some());
-        // thinkingConfig is internal, should NOT be at top level
-        assert!(body.get("thinkingConfig").is_none());
-        // But it should be in generationConfig
-        assert_eq!(
-            body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
-            "HIGH"
+        // thinkingConfig must be at request root level (not inside generationConfig)
+        assert_eq!(body["thinkingConfig"]["thinkingLevel"], "HIGH");
+        // Must NOT be nested inside generationConfig
+        assert!(
+            body.get("generationConfig")
+                .and_then(|gc| gc.get("thinkingConfig"))
+                .is_none(),
+            "thinkingConfig must NOT be inside generationConfig"
         );
     }
 
@@ -3001,6 +3053,19 @@ mod tests {
     }
 
     #[test]
+    fn test_gemini_reasoning_effort_none() {
+        let request = Request::default()
+            .model("gemini-2.5-flash")
+            .messages(vec![Message::user("no thinking")])
+            .reasoning_effort("none");
+        let body = translate_request(&request, None);
+        assert_eq!(
+            body["thinkingConfig"]["thinkingLevel"], "THINKING_BUDGET_NONE",
+            "reasoning_effort 'none' must map to THINKING_BUDGET_NONE, not NONE"
+        );
+    }
+
+    #[test]
     fn test_gemini_reasoning_effort_does_not_override_explicit_thinking_config() {
         let request = Request::default()
             .model("gemini-2.5-flash")
@@ -3015,11 +3080,8 @@ mod tests {
             })));
         let body = translate_request(&request, None);
         // Explicit provider_options.gemini.thinkingConfig should take precedence
-        // The thinkingConfig from provider_options goes into generationConfig
-        assert_eq!(
-            body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
-            "LOW"
-        );
+        // thinkingConfig is at request root level
+        assert_eq!(body["thinkingConfig"]["thinkingLevel"], "LOW");
     }
 
     // === S-1: text_id propagation to TextDelta/TextEnd ===

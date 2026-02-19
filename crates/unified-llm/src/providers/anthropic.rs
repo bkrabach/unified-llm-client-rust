@@ -533,6 +533,19 @@ impl StreamTranslator {
                                 ..Default::default()
                             });
                         }
+                        "signature_delta" => {
+                            let sig_fragment = delta
+                                .get("signature")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            match self.active_thinking_signature {
+                                Some(ref mut existing) => existing.push_str(sig_fragment),
+                                None => {
+                                    self.active_thinking_signature =
+                                        Some(sig_fragment.to_string())
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -578,14 +591,8 @@ impl StreamTranslator {
                         self.accumulated_tool_json.clear();
                     }
                     Some("thinking") => {
-                        // Capture signature if present in the stop event data
-                        if let Some(sig) = data
-                            .get("content_block")
-                            .and_then(|cb| cb.get("signature"))
-                            .and_then(|v| v.as_str())
-                        {
-                            self.active_thinking_signature = Some(sig.to_string());
-                        }
+                        // Signature is accumulated from signature_delta events
+                        // during content_block_delta processing (not from content_block_stop).
                         events.push(StreamEvent {
                             event_type: StreamEventType::ReasoningEnd,
                             raw: self
@@ -3516,8 +3523,11 @@ mod tests {
 
     #[test]
     fn test_anthropic_stream_thinking_captures_signature() {
-        // Simulate the SSE event sequence for a thinking block with a signature
-        // in the content_block_stop event.
+        // Simulate the real Anthropic SSE event sequence for a thinking block:
+        // 1. content_block_start (thinking)
+        // 2. content_block_delta (thinking_delta)
+        // 3. content_block_delta (signature_delta) — signature arrives here
+        // 4. content_block_stop — bare event, no signature data
         let mut translator = StreamTranslator::new();
 
         // 1. content_block_start for thinking
@@ -3538,12 +3548,20 @@ mod tests {
             }),
         );
 
-        // 3. content_block_stop — Anthropic sends signature here
+        // 3. content_block_delta with signature_delta — real API sends signature here
+        let _events = translator.process(
+            "content_block_delta",
+            &serde_json::json!({
+                "index": 0,
+                "delta": {"type": "signature_delta", "signature": "sig_abc123"}
+            }),
+        );
+
+        // 4. content_block_stop — bare event, no signature data (real API behavior)
         let events = translator.process(
             "content_block_stop",
             &serde_json::json!({
-                "index": 0,
-                "content_block": {"type": "thinking", "signature": "sig_abc123"}
+                "index": 0
             }),
         );
 
@@ -3562,6 +3580,72 @@ mod tests {
             sig,
             Some("sig_abc123"),
             "ReasoningEnd should carry signature 'sig_abc123' in its raw field. Got: {:?}",
+            reasoning_end.raw
+        );
+    }
+
+    #[test]
+    fn test_anthropic_stream_signature_delta_captured() {
+        // Dedicated test: signature_delta events must be accumulated and
+        // attached to the ReasoningEnd event. Tests multiple fragments.
+        let mut translator = StreamTranslator::new();
+
+        // content_block_start for thinking
+        let _events = translator.process(
+            "content_block_start",
+            &serde_json::json!({
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""}
+            }),
+        );
+
+        // thinking_delta
+        let _events = translator.process(
+            "content_block_delta",
+            &serde_json::json!({
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "reasoning..."}
+            }),
+        );
+
+        // signature_delta fragment 1
+        let _events = translator.process(
+            "content_block_delta",
+            &serde_json::json!({
+                "index": 0,
+                "delta": {"type": "signature_delta", "signature": "sig_part1"}
+            }),
+        );
+
+        // signature_delta fragment 2
+        let _events = translator.process(
+            "content_block_delta",
+            &serde_json::json!({
+                "index": 0,
+                "delta": {"type": "signature_delta", "signature": "_part2"}
+            }),
+        );
+
+        // content_block_stop (bare, no signature)
+        let events = translator.process(
+            "content_block_stop",
+            &serde_json::json!({"index": 0}),
+        );
+
+        let reasoning_end = events
+            .iter()
+            .find(|e| e.event_type == StreamEventType::ReasoningEnd)
+            .expect("Should have ReasoningEnd");
+
+        let sig = reasoning_end
+            .raw
+            .as_ref()
+            .and_then(|d| d.get("signature"))
+            .and_then(|v| v.as_str());
+        assert_eq!(
+            sig,
+            Some("sig_part1_part2"),
+            "Accumulated signature should be 'sig_part1_part2'. Got: {:?}",
             reasoning_end.raw
         );
     }
