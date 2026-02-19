@@ -10,7 +10,7 @@
     "supports_reasoning": true,
     "input_cost_per_million": 3.0,
     "output_cost_per_million": 15.0,
-    "aliases": ["sonnet", "claude-sonnet"]
+    "aliases": ["sonnet", "claude-sonnet", "claude-opus-4-6", "claude-sonnet-4-5"]
   },
   {
     "id": "claude-3-5-haiku-latest",
@@ -36,7 +36,7 @@
     "supports_reasoning": false,
     "input_cost_per_million": 0.15,
     "output_cost_per_million": 0.60,
-    "aliases": ["4o-mini", "gpt4o-mini"]
+    "aliases": ["4o-mini", "gpt4o-mini", "gpt-5.2-mini"]
   },
   {
     "id": "gpt-4o",
@@ -49,7 +49,7 @@
     "supports_reasoning": false,
     "input_cost_per_million": 2.50,
     "output_cost_per_million": 10.0,
-    "aliases": ["4o", "gpt4o"]
+    "aliases": ["4o", "gpt4o", "gpt-5.2"]
   },
   {
     "id": "gemini-2.0-flash",
@@ -62,7 +62,7 @@
     "supports_reasoning": false,
     "input_cost_per_million": 0.10,
     "output_cost_per_million": 0.40,
-    "aliases": ["gemini-flash", "flash"]
+    "aliases": ["gemini-flash", "flash", "gemini-3-flash-preview"]
   },
   {
     "id": "gemini-1.5-flash",
@@ -88,6 +88,6 @@
     "supports_reasoning": true,
     "input_cost_per_million": 1.25,
     "output_cost_per_million": 5.0,
-    "aliases": ["gemini-pro"]
+    "aliases": ["gemini-pro", "gemini-3-pro-preview"]
   }
 ]

@@ -13,11 +13,6 @@ pub struct Request {
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// Optional system prompt. See spec §4.3 — corresponds to the generate() system parameter.
-    /// Providers extract this into their native system instruction field
-    /// (e.g., Anthropic `system`, OpenAI `instructions`, Gemini `systemInstruction`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,12 +56,6 @@ impl Request {
     /// Builder-style setter for provider.
     pub fn provider(mut self, provider: Option<String>) -> Self {
         self.provider = provider;
-        self
-    }
-
-    /// Builder-style setter for system prompt.
-    pub fn system(mut self, system: impl Into<String>) -> Self {
-        self.system = Some(system.into());
         self
     }
 
@@ -141,7 +130,6 @@ mod tests {
         assert!(req.model.is_empty());
         assert!(req.messages.is_empty());
         assert!(req.provider.is_none());
-        assert!(req.system.is_none());
         assert!(req.tools.is_none());
         assert!(req.tool_choice.is_none());
         assert!(req.response_format.is_none());
@@ -174,12 +162,6 @@ mod tests {
             .model("gpt-4")
             .provider(Some("openai".into()));
         assert_eq!(req.provider, Some("openai".into()));
-    }
-
-    #[test]
-    fn test_request_builder_system() {
-        let req = Request::default().model("test").system("You are helpful.");
-        assert_eq!(req.system, Some("You are helpful.".into()));
     }
 
     #[test]

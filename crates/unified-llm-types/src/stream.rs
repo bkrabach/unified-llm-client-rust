@@ -88,6 +88,15 @@ pub struct StreamError {
     pub message: String,
     /// Whether the operation that caused this error can be retried.
     pub retryable: bool,
+    /// Provider that originated the error (e.g., `"anthropic"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// HTTP status code from the provider response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    /// How long to wait before retrying (from provider `Retry-After` header).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<std::time::Duration>,
 }
 
 impl StreamError {
@@ -97,6 +106,9 @@ impl StreamError {
             kind: crate::error::ErrorKind::Stream,
             message: message.into(),
             retryable: true,
+            provider: None,
+            status_code: None,
+            retry_after: None,
         }
     }
     /// Create from a message string with `RequestTimeout` kind (retryable per spec §6.3).
@@ -105,14 +117,20 @@ impl StreamError {
             kind: crate::error::ErrorKind::RequestTimeout,
             message: message.into(),
             retryable: true,
+            provider: None,
+            status_code: None,
+            retry_after: None,
         }
     }
-    /// Create from a full `Error` reference.
+    /// Create from a full `Error` reference, preserving provider context.
     pub fn from_error(error: &crate::error::Error) -> Self {
         Self {
             kind: error.kind,
             message: error.message.clone(),
             retryable: error.retryable,
+            provider: error.provider.clone(),
+            status_code: error.status_code,
+            retry_after: error.retry_after,
         }
     }
 }
@@ -383,6 +401,36 @@ mod tests {
     }
 
     #[test]
+    fn test_stream_error_from_error_preserves_retry_after() {
+        let error = crate::error::Error::from_http_status(
+            429,
+            "Rate limited".into(),
+            "anthropic",
+            None,
+            Some(std::time::Duration::from_secs(30)),
+        );
+        let stream_err = StreamError::from_error(&error);
+        assert_eq!(stream_err.kind, crate::error::ErrorKind::RateLimit);
+        assert_eq!(stream_err.retry_after, Some(std::time::Duration::from_secs(30)));
+        assert_eq!(stream_err.status_code, Some(429));
+        assert_eq!(stream_err.provider, Some("anthropic".to_string()));
+        assert!(stream_err.retryable);
+    }
+
+    #[test]
+    fn test_stream_error_constructors_default_new_fields_to_none() {
+        let stream_err = StreamError::stream("connection lost");
+        assert!(stream_err.provider.is_none());
+        assert!(stream_err.status_code.is_none());
+        assert!(stream_err.retry_after.is_none());
+
+        let timeout_err = StreamError::timeout("timed out");
+        assert!(timeout_err.provider.is_none());
+        assert!(timeout_err.status_code.is_none());
+        assert!(timeout_err.retry_after.is_none());
+    }
+
+    #[test]
     fn test_stream_event_error_preserves_kind_and_retryable() {
         let evt = StreamEvent {
             event_type: StreamEventType::Error,
@@ -390,6 +438,9 @@ mod tests {
                 kind: crate::error::ErrorKind::RateLimit,
                 message: "Too many requests".into(),
                 retryable: true,
+                provider: None,
+                status_code: None,
+                retry_after: None,
             })),
             ..Default::default()
         };

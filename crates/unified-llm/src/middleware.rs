@@ -210,7 +210,7 @@ mod tests {
             next: Next<'a>,
         ) -> BoxFuture<'a, Result<Response, Error>> {
             Box::pin(async move {
-                request.system = Some("injected by middleware".to_string());
+                request.temperature = Some(0.42); // modify a real field to prove middleware runs
                 let mut response = next.run(request).await?;
                 response.warnings.push(Warning {
                     message: "modified by middleware".to_string(),

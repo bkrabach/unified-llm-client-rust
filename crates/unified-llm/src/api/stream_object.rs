@@ -622,6 +622,9 @@ mod tests {
                     kind: ErrorKind::Server,
                     message: "mid-stream error".into(),
                     retryable: false,
+                    provider: None,
+                    status_code: None,
+                    retry_after: None,
                 })),
                 ..Default::default()
             }),

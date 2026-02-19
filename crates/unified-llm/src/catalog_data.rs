@@ -306,6 +306,34 @@ mod tests {
     }
 
     #[test]
+    fn test_spec_model_names_resolve_via_aliases() {
+        // Spec-mandated model IDs should resolve to real deployed models via aliases
+        let cases = vec![
+            ("claude-opus-4-6", "anthropic"),
+            ("claude-sonnet-4-5", "anthropic"),
+            ("gpt-5.2-mini", "openai"),
+            ("gpt-5.2", "openai"),
+            ("gemini-3-pro-preview", "gemini"),
+            ("gemini-3-flash-preview", "gemini"),
+        ];
+        for (spec_name, expected_provider) in cases {
+            let info = get_model_info(spec_name);
+            assert!(
+                info.is_some(),
+                "Spec model name '{}' should resolve via alias",
+                spec_name
+            );
+            assert_eq!(
+                info.unwrap().provider,
+                expected_provider,
+                "Spec model '{}' should map to provider '{}'",
+                spec_name,
+                expected_provider
+            );
+        }
+    }
+
+    #[test]
     fn test_catalog_advisory_not_restrictive() {
         // Verify unknown model IDs can still be used with Client (catalog doesn't block).
         // get_model_info returning None is NOT an error -- the caller can still proceed.
