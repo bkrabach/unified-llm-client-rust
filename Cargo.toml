@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/unified-llm-types", "crates/unified-llm"]
+resolver = "2"
