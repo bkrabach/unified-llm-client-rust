@@ -414,7 +414,7 @@ impl ProviderAdapter for GeminiAdapter {
 // === Request Translation ===
 
 /// Translate a unified Request into a Gemini generateContent JSON body.
-pub fn translate_request(
+pub(crate) fn translate_request(
     request: &Request,
     tool_call_map: Option<&std::collections::HashMap<String, String>>,
 ) -> serde_json::Value {
@@ -502,10 +502,7 @@ pub fn translate_request(
                         // Preserve is_error flag in the response object
                         if tool_result.is_error {
                             if let Some(obj) = response_value.as_object_mut() {
-                                obj.insert(
-                                    "is_error".to_string(),
-                                    serde_json::Value::Bool(true),
-                                );
+                                obj.insert("is_error".to_string(), serde_json::Value::Bool(true));
                             }
                         }
                         let resolved_name = tool_call_map
@@ -782,7 +779,7 @@ fn map_finish_reason(reason: &str, has_function_calls: bool) -> FinishReason {
 }
 
 /// Parse a Gemini generateContent response JSON into a unified Response.
-pub fn parse_response(
+pub(crate) fn parse_response(
     raw: serde_json::Value,
     headers: &reqwest::header::HeaderMap,
 ) -> Result<Response, Error> {
@@ -940,7 +937,7 @@ pub fn parse_response(
 // === Error Translation ===
 
 /// Parse a Gemini error response into a unified Error.
-pub fn parse_error(
+pub(crate) fn parse_error(
     status: u16,
     headers: &reqwest::header::HeaderMap,
     body: serde_json::Value,
@@ -1644,7 +1641,8 @@ mod tests {
         assert_eq!(fr["name"], "get_weather");
         // The error flag must be present in the response
         assert_eq!(
-            fr["response"]["is_error"], true,
+            fr["response"]["is_error"],
+            true,
             "is_error flag must be preserved in functionResponse. Got: {}",
             serde_json::to_string_pretty(&fr["response"]).unwrap()
         );

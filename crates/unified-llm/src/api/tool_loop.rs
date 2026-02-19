@@ -217,6 +217,7 @@ mod tests {
     async fn test_execute_all_tools_parallel() {
         use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
+        use std::time::{Duration, Instant};
         let counter = Arc::new(AtomicU32::new(0));
         let c = counter.clone();
         let tool = Tool::active(
@@ -226,6 +227,7 @@ mod tests {
             move |_| {
                 let c = c.clone();
                 Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     c.fetch_add(1, Ordering::SeqCst);
                     Ok(serde_json::json!("done"))
                 })
@@ -236,12 +238,20 @@ mod tests {
             make_tool_call("c2", "inc", serde_json::json!({})),
         ];
         let call_refs: Vec<&ToolCallData> = calls.iter().collect();
+        let start = Instant::now();
         let results = execute_all_tools(&[tool], &call_refs, &[], &None, None).await;
+        let elapsed = start.elapsed();
         assert_eq!(results.len(), 2);
         assert_eq!(counter.load(Ordering::SeqCst), 2);
         // Results preserve ordering
         assert_eq!(results[0].tool_call_id, "c1");
         assert_eq!(results[1].tool_call_id, "c2");
+        // Prove concurrency: two 100ms tools should complete in < 250ms (sequential would be 200ms+)
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "Tools should run concurrently, took {:?}",
+            elapsed
+        );
     }
 
     // --- DoD 8.7.7: Tool execution errors → is_error=true ---

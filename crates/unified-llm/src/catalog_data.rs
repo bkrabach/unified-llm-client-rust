@@ -92,16 +92,30 @@ pub fn list_models(provider: Option<&str>) -> Vec<ModelInfo> {
 ///
 /// Spec S2.9: "prefer the latest models -- they are generally more capable."
 pub fn get_latest_model(provider: &str, capability: Option<&str>) -> Option<ModelInfo> {
+    let cap_filter = |m: &&ModelInfo| match capability {
+        Some("tools") => m.supports_tools,
+        Some("vision") => m.supports_vision,
+        Some("reasoning") => m.supports_reasoning,
+        Some(_) => false,
+        None => true,
+    };
+
+    // Check runtime-loaded models first (they take precedence)
+    if let Ok(extra) = EXTRA_MODELS.read() {
+        if let Some(m) = extra
+            .iter()
+            .filter(|m| m.provider == provider)
+            .find(cap_filter)
+        {
+            return Some(m.clone());
+        }
+    }
+
+    // Fall back to built-in catalog
     CATALOG
         .iter()
         .filter(|m| m.provider == provider)
-        .find(|m| match capability {
-            Some("tools") => m.supports_tools,
-            Some("vision") => m.supports_vision,
-            Some("reasoning") => m.supports_reasoning,
-            Some(_) => false,
-            None => true,
-        })
+        .find(cap_filter)
         .cloned()
 }
 
@@ -331,6 +345,44 @@ mod tests {
                 expected_provider
             );
         }
+    }
+
+    #[test]
+    fn test_get_latest_model_finds_runtime_loaded_model() {
+        // M-3: get_latest_model() should search EXTRA_MODELS, not just static CATALOG.
+        let custom_json = r#"[{
+            "id": "runtime-latest-test-model",
+            "provider": "runtime_latest_test",
+            "display_name": "Runtime Latest Test",
+            "context_window": 16384,
+            "supports_tools": true,
+            "supports_vision": false,
+            "supports_reasoning": false,
+            "aliases": [],
+            "cost_per_million_input_tokens": 0.0,
+            "cost_per_million_output_tokens": 0.0
+        }]"#;
+        load_catalog_from_json(custom_json).unwrap();
+
+        let latest = get_latest_model("runtime_latest_test", None);
+        assert!(
+            latest.is_some(),
+            "get_latest_model should find runtime-loaded models"
+        );
+        assert_eq!(latest.unwrap().id, "runtime-latest-test-model");
+
+        // Also verify capability filtering works on runtime models
+        let with_tools = get_latest_model("runtime_latest_test", Some("tools"));
+        assert!(
+            with_tools.is_some(),
+            "get_latest_model should find runtime models with capability filter"
+        );
+
+        let with_vision = get_latest_model("runtime_latest_test", Some("vision"));
+        assert!(
+            with_vision.is_none(),
+            "runtime model doesn't support vision, should return None"
+        );
     }
 
     #[test]

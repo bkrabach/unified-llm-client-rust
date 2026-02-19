@@ -133,6 +133,7 @@ impl StreamLifecycle {
     }
 
     /// Whether a FINISH event has been observed.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_finished(&self) -> bool {
         self.finished
     }

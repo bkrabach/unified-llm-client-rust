@@ -343,7 +343,7 @@ impl ProviderAdapter for OpenAiAdapter {
 // === Request Translation ===
 
 /// Translate a unified Request into an OpenAI Responses API JSON body.
-pub fn translate_request(request: &Request) -> serde_json::Value {
+pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
     let mut body = serde_json::Map::new();
 
     // Model
@@ -635,7 +635,7 @@ fn determine_finish_reason(status: &str, has_tool_calls: bool) -> FinishReason {
 }
 
 /// Parse an OpenAI Responses API response JSON into a unified Response.
-pub fn parse_response(
+pub(crate) fn parse_response(
     raw: serde_json::Value,
     headers: &reqwest::header::HeaderMap,
 ) -> Result<Response, Error> {
@@ -794,7 +794,7 @@ pub fn parse_response(
 // === Error Translation ===
 
 /// Parse an OpenAI error response into a unified Error.
-pub fn parse_error(
+pub(crate) fn parse_error(
     status: u16,
     headers: &reqwest::header::HeaderMap,
     body: serde_json::Value,

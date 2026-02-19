@@ -411,7 +411,10 @@ mod tests {
         );
         let stream_err = StreamError::from_error(&error);
         assert_eq!(stream_err.kind, crate::error::ErrorKind::RateLimit);
-        assert_eq!(stream_err.retry_after, Some(std::time::Duration::from_secs(30)));
+        assert_eq!(
+            stream_err.retry_after,
+            Some(std::time::Duration::from_secs(30))
+        );
         assert_eq!(stream_err.status_code, Some(429));
         assert_eq!(stream_err.provider, Some("anthropic".to_string()));
         assert!(stream_err.retryable);

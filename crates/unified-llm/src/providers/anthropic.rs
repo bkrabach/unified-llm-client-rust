@@ -541,8 +541,7 @@ impl StreamTranslator {
                             match self.active_thinking_signature {
                                 Some(ref mut existing) => existing.push_str(sig_fragment),
                                 None => {
-                                    self.active_thinking_signature =
-                                        Some(sig_fragment.to_string())
+                                    self.active_thinking_signature = Some(sig_fragment.to_string())
                                 }
                             }
                         }
@@ -732,7 +731,7 @@ impl ProviderAdapter for AnthropicAdapter {
 // === Request Translation ===
 
 /// Translate a unified Request into an Anthropic Messages API JSON body.
-pub fn translate_request(request: &Request) -> serde_json::Value {
+pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
     let mut body = serde_json::Map::new();
 
     // Model
@@ -934,7 +933,7 @@ pub fn translate_request(request: &Request) -> serde_json::Value {
 /// 1. Last block of system prompt
 /// 2. Last tool definition (if tools present)
 /// 3. Last message in conversation prefix (messages before final user message)
-pub fn translate_request_with_cache(request: &Request) -> serde_json::Value {
+pub(crate) fn translate_request_with_cache(request: &Request) -> serde_json::Value {
     let mut body = translate_request(request);
 
     if !should_auto_cache(request.provider_options.as_ref()) {
@@ -1177,7 +1176,7 @@ fn merge_consecutive_messages(messages: Vec<serde_json::Value>) -> Vec<serde_jso
 // === Response Translation ===
 
 /// Map Anthropic stop_reason to unified FinishReason.
-pub fn map_finish_reason(reason: &str) -> unified_llm_types::FinishReason {
+pub(crate) fn map_finish_reason(reason: &str) -> unified_llm_types::FinishReason {
     let unified = match reason {
         "end_turn" | "stop_sequence" => "stop",
         "max_tokens" => "length",
@@ -1191,7 +1190,7 @@ pub fn map_finish_reason(reason: &str) -> unified_llm_types::FinishReason {
 }
 
 /// Parse an Anthropic Messages API response JSON into a unified Response.
-pub fn parse_response(
+pub(crate) fn parse_response(
     raw: serde_json::Value,
     headers: &reqwest::header::HeaderMap,
 ) -> Result<Response, Error> {
@@ -1356,7 +1355,7 @@ fn parse_content_blocks(blocks: &[serde_json::Value]) -> Vec<unified_llm_types::
 // === Error Translation ===
 
 /// Parse an Anthropic error response into a unified Error.
-pub fn parse_error(
+pub(crate) fn parse_error(
     status: u16,
     headers: &reqwest::header::HeaderMap,
     body: serde_json::Value,
@@ -2960,6 +2959,80 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn test_cache_control_combined_system_tools_and_prefix() {
+        // L-4: Verify cache_control is injected on all three targets simultaneously:
+        // system prompt, last tool, and conversation prefix message.
+        let req = Request::default()
+            .model("test")
+            .messages(vec![
+                Message::system("You are a helpful assistant"),
+                Message::user("First question"),
+                Message::assistant("First answer"),
+                Message::user("Second question"),
+            ])
+            .tools(vec![
+                unified_llm_types::ToolDefinition {
+                    name: "tool_a".into(),
+                    description: "Tool A".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                },
+                unified_llm_types::ToolDefinition {
+                    name: "tool_b".into(),
+                    description: "Tool B".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                },
+            ]);
+        let body = translate_request_with_cache(&req);
+        let cache_ephemeral = serde_json::json!({"type": "ephemeral"});
+
+        // 1. System prompt: last block should have cache_control
+        let system = body.get("system").expect("should have system");
+        let system_arr = system.as_array().expect("system should be array");
+        let last_system = system_arr.last().unwrap();
+        assert_eq!(
+            last_system.get("cache_control"),
+            Some(&cache_ephemeral),
+            "Last system block should have cache_control"
+        );
+
+        // 2. Tools: last tool should have cache_control, first should not
+        let tools = body.get("tools").expect("should have tools");
+        let tools_arr = tools.as_array().expect("tools should be array");
+        assert_eq!(tools_arr.len(), 2);
+        assert!(
+            tools_arr[0].get("cache_control").is_none(),
+            "First tool should NOT have cache_control"
+        );
+        assert_eq!(
+            tools_arr[1].get("cache_control"),
+            Some(&cache_ephemeral),
+            "Last tool should have cache_control"
+        );
+
+        // 3. Conversation prefix: message before final user should have cache_control
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 3); // user, assistant, user (system extracted)
+                                       // messages[1] = assistant "First answer" — this is the prefix message
+        let prefix_msg = &messages[1];
+        let content = prefix_msg.get("content").unwrap().as_array().unwrap();
+        let last_block = content.last().unwrap();
+        assert_eq!(
+            last_block.get("cache_control"),
+            Some(&cache_ephemeral),
+            "Last content block of conversation prefix should have cache_control"
+        );
+        // Final user message should NOT have cache_control
+        let final_msg = &messages[2];
+        let final_content = final_msg.get("content").unwrap().as_array().unwrap();
+        assert!(
+            final_content.last().unwrap().get("cache_control").is_none(),
+            "Final user message should NOT have cache_control"
+        );
+    }
+
     // === Beta Header Tests (P1-T24) ===
 
     #[test]
@@ -3627,10 +3700,7 @@ mod tests {
         );
 
         // content_block_stop (bare, no signature)
-        let events = translator.process(
-            "content_block_stop",
-            &serde_json::json!({"index": 0}),
-        );
+        let events = translator.process("content_block_stop", &serde_json::json!({"index": 0}));
 
         let reasoning_end = events
             .iter()

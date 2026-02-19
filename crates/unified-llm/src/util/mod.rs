@@ -1,7 +1,7 @@
-pub mod http;
+pub(crate) mod http;
 pub mod image;
-pub mod provider_options;
+pub(crate) mod provider_options;
 pub mod retry;
-pub mod sse;
+pub(crate) mod sse;
 pub mod stream_accumulator;
-pub mod stream_lifecycle;
+pub(crate) mod stream_lifecycle;

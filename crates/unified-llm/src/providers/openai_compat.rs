@@ -317,7 +317,7 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
 // === Request Translation ===
 
 /// Translate a unified Request into a Chat Completions JSON body.
-pub fn translate_request(request: &Request) -> serde_json::Value {
+pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
     let mut body = serde_json::Map::new();
     body.insert("model".into(), json!(request.model));
 
@@ -572,7 +572,7 @@ fn translate_user_content(parts: &[ContentPart]) -> serde_json::Value {
 // === Response Translation ===
 
 /// Parse a Chat Completions response into a unified Response.
-pub fn parse_response(
+pub(crate) fn parse_response(
     raw: serde_json::Value,
     headers: &reqwest::header::HeaderMap,
 ) -> Result<Response, Error> {
@@ -731,7 +731,7 @@ pub fn parse_response(
 // === Error Translation ===
 
 /// Parse an error response from a Chat Completions API.
-pub fn parse_error(
+pub(crate) fn parse_error(
     status: u16,
     headers: &reqwest::header::HeaderMap,
     body: serde_json::Value,

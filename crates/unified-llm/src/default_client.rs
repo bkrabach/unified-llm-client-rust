@@ -5,7 +5,7 @@
 //
 // Uses arc-swap for lock-free reads with atomic updates.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
@@ -17,6 +17,9 @@ use crate::client::Client;
 /// The global default client. Wraps `Option<Arc<Client>>`.
 static DEFAULT_CLIENT: Lazy<ArcSwap<Option<Arc<Client>>>> =
     Lazy::new(|| ArcSwap::from_pointee(None));
+
+/// Guard for the lazy-init path to prevent TOCTOU double-initialization.
+static INIT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// Set the module-level default client explicitly.
 ///
@@ -32,12 +35,20 @@ pub fn set_default_client(client: Client) {
 ///
 /// Spec S2.5: "This client is lazily initialized from environment variables on first use."
 pub fn get_default_client() -> Result<Arc<Client>, Error> {
+    // Fast path: already initialized (lock-free read)
     let guard = DEFAULT_CLIENT.load();
     if let Some(ref client) = **guard {
         return Ok(Arc::clone(client));
     }
 
-    // Lazy init from env
+    // Slow path: acquire lock and double-check to prevent TOCTOU race
+    let _lock = INIT_LOCK.lock().unwrap();
+    let guard = DEFAULT_CLIENT.load();
+    if let Some(ref client) = **guard {
+        return Ok(Arc::clone(client));
+    }
+
+    // Lazy init from env (under lock)
     let client = Arc::new(Client::from_env()?);
     DEFAULT_CLIENT.store(Arc::new(Some(Arc::clone(&client))));
     Ok(client)
