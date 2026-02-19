@@ -1,6 +1,6 @@
 //! Integration smoke tests with real API keys.
 //!
-//! Run with: cargo test -p unified-llm --test smoke_test -- --ignored
+//! Run with: cargo test -p unified-llm --test smoke_test -- --ignored --test-threads=1
 //!
 //! Requires: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY (or GOOGLE_API_KEY)
 //!
@@ -19,6 +19,7 @@ fn require_api_keys() -> Client {
 
 /// DoD 8.10.1: Basic generation across all 3 providers.
 #[tokio::test]
+#[ignore]
 async fn test_smoke_basic_generation_all_providers() {
     let client = require_api_keys();
 
@@ -57,6 +58,7 @@ async fn test_smoke_basic_generation_all_providers() {
 
 /// DoD 8.10.2: Streaming.
 #[tokio::test]
+#[ignore]
 async fn test_smoke_streaming() {
     use futures::StreamExt;
     use unified_llm::api::stream::stream;
@@ -97,6 +99,7 @@ async fn test_smoke_streaming() {
 
 /// DoD 8.10.3: Tool calling with parallel execution.
 #[tokio::test]
+#[ignore]
 async fn test_smoke_tool_calling() {
     use unified_llm::api::types::Tool;
 
@@ -152,6 +155,7 @@ async fn test_smoke_tool_calling() {
 
 /// DoD 8.10.4: Image input.
 #[tokio::test]
+#[ignore]
 async fn test_smoke_image_input() {
     use unified_llm_types::{ContentPart, Message, Role};
 
@@ -191,6 +195,7 @@ async fn test_smoke_image_input() {
 
 /// DoD 8.10.5: Structured output (generate_object).
 #[tokio::test]
+#[ignore]
 async fn test_smoke_structured_output() {
     use unified_llm::generate_object;
 
@@ -224,6 +229,7 @@ async fn test_smoke_structured_output() {
 
 /// DoD 8.10.6: Error handling.
 #[tokio::test]
+#[ignore]
 async fn test_smoke_error_handling() {
     use unified_llm_types::ErrorKind;
 

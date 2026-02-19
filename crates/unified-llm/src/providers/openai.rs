@@ -606,7 +606,14 @@ fn translate_user_content(parts: &[ContentPart]) -> Vec<serde_json::Value> {
 // === Response Translation ===
 
 /// Map OpenAI status + output to unified finish reason.
-fn determine_finish_reason(status: &str, has_tool_calls: bool) -> FinishReason {
+///
+/// When `status` is `"incomplete"`, checks `incomplete_details.reason` to
+/// distinguish `"content_filter"` from the default `"max_output_tokens"`.
+fn determine_finish_reason(
+    status: &str,
+    has_tool_calls: bool,
+    incomplete_details: Option<&serde_json::Value>,
+) -> FinishReason {
     if has_tool_calls {
         FinishReason {
             reason: "tool_calls".to_string(),
@@ -618,10 +625,20 @@ fn determine_finish_reason(status: &str, has_tool_calls: bool) -> FinishReason {
                 reason: "stop".to_string(),
                 raw: Some("completed".to_string()),
             },
-            "incomplete" => FinishReason {
-                reason: "length".to_string(),
-                raw: Some("incomplete".to_string()),
-            },
+            "incomplete" => {
+                let sub_reason = incomplete_details
+                    .and_then(|d| d.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("max_output_tokens");
+                let unified = match sub_reason {
+                    "content_filter" => "content_filter",
+                    _ => "length",
+                };
+                FinishReason {
+                    reason: unified.to_string(),
+                    raw: Some(status.to_string()),
+                }
+            }
             "failed" => FinishReason {
                 reason: "error".to_string(),
                 raw: Some("failed".to_string()),
@@ -739,7 +756,8 @@ pub(crate) fn parse_response(
     }
 
     // Finish reason
-    let finish_reason = determine_finish_reason(status, has_tool_calls);
+    let finish_reason =
+        determine_finish_reason(status, has_tool_calls, raw.get("incomplete_details"));
 
     // Usage
     let usage_obj = raw.get("usage");
@@ -1084,7 +1102,11 @@ impl OpenAiStreamTranslator {
                     })
                     .unwrap_or(false);
 
-                let finish_reason = determine_finish_reason(status, has_tool_calls);
+                let finish_reason = determine_finish_reason(
+                    status,
+                    has_tool_calls,
+                    response_data.get("incomplete_details"),
+                );
 
                 events.push(StreamEvent {
                     event_type: StreamEventType::Finish,
@@ -1838,6 +1860,41 @@ mod tests {
                 "status={status}, has_tools={has_tools}"
             );
         }
+    }
+
+    // ===== DEFECT-1: determine_finish_reason with incomplete_details =====
+
+    #[test]
+    fn test_determine_finish_reason_incomplete_content_filter() {
+        let details = serde_json::json!({"reason": "content_filter"});
+        let fr = determine_finish_reason("incomplete", false, Some(&details));
+        assert_eq!(
+            fr.reason, "content_filter",
+            "incomplete + content_filter reason should map to content_filter"
+        );
+        assert_eq!(fr.raw, Some("incomplete".to_string()));
+    }
+
+    #[test]
+    fn test_determine_finish_reason_incomplete_max_output_tokens() {
+        let details = serde_json::json!({"reason": "max_output_tokens"});
+        let fr = determine_finish_reason("incomplete", false, Some(&details));
+        assert_eq!(
+            fr.reason, "length",
+            "incomplete + max_output_tokens should map to length"
+        );
+        assert_eq!(fr.raw, Some("incomplete".to_string()));
+    }
+
+    #[test]
+    fn test_determine_finish_reason_incomplete_no_details() {
+        // Backwards compat: no incomplete_details should default to "length"
+        let fr = determine_finish_reason("incomplete", false, None);
+        assert_eq!(
+            fr.reason, "length",
+            "incomplete with no details should default to length"
+        );
+        assert_eq!(fr.raw, Some("incomplete".to_string()));
     }
 
     // ===== P2B-T06: Error Translation =====

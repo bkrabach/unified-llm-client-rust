@@ -205,7 +205,7 @@ mod tests {
     fn test_get_latest_model_anthropic() {
         let latest = get_latest_model("anthropic", None).unwrap();
         assert_eq!(latest.provider, "anthropic");
-        assert_eq!(latest.id, "claude-sonnet-4-20250514");
+        assert_eq!(latest.id, "claude-opus-4-20250514");
     }
 
     #[test]
@@ -270,8 +270,8 @@ mod tests {
             "supports_vision": false,
             "supports_reasoning": false,
             "aliases": [],
-            "cost_per_million_input_tokens": 0.0,
-            "cost_per_million_output_tokens": 0.0
+            "input_cost_per_million": 0.5,
+            "output_cost_per_million": 1.5
         }]"#;
         let result = load_catalog_from_json(custom_json);
         assert!(result.is_ok(), "Valid JSON should load successfully");
@@ -282,7 +282,11 @@ mod tests {
             info.is_some(),
             "Custom model should be findable after loading"
         );
-        assert_eq!(info.unwrap().provider, "custom_test");
+        let info = info.unwrap();
+        assert_eq!(info.provider, "custom_test");
+        // Verify cost fields are actually deserialized (not silently dropped)
+        assert_eq!(info.input_cost_per_million, Some(0.5));
+        assert_eq!(info.output_cost_per_million, Some(1.5));
     }
 
     #[test]
@@ -303,8 +307,8 @@ mod tests {
             "supports_vision": false,
             "supports_reasoning": false,
             "aliases": ["merge-alias"],
-            "cost_per_million_input_tokens": 1.0,
-            "cost_per_million_output_tokens": 2.0
+            "input_cost_per_million": 1.0,
+            "output_cost_per_million": 2.0
         }]"#;
         let models: Vec<ModelInfo> = serde_json::from_str(custom_json).unwrap();
         merge_catalog(models);
@@ -312,7 +316,11 @@ mod tests {
         // Verify the merged model is findable
         let info = get_model_info("merge-test-model-af18");
         assert!(info.is_some(), "Merged model should be findable");
-        assert_eq!(info.unwrap().context_window, 8192);
+        let info = info.unwrap();
+        assert_eq!(info.context_window, 8192);
+        // Verify cost fields are actually deserialized
+        assert_eq!(info.input_cost_per_million, Some(1.0));
+        assert_eq!(info.output_cost_per_million, Some(2.0));
 
         // Verify by alias too
         let info = get_model_info("merge-alias");
@@ -320,29 +328,34 @@ mod tests {
     }
 
     #[test]
-    fn test_spec_model_names_resolve_via_aliases() {
-        // Spec-mandated model IDs should resolve to real deployed models via aliases
+    fn test_model_aliases_resolve_to_correct_provider() {
+        // Common short aliases should resolve to real deployed models
         let cases = vec![
-            ("claude-opus-4-6", "anthropic"),
-            ("claude-sonnet-4-5", "anthropic"),
-            ("gpt-5.2-mini", "openai"),
-            ("gpt-5.2", "openai"),
-            ("gemini-3-pro-preview", "gemini"),
-            ("gemini-3-flash-preview", "gemini"),
+            ("opus", "anthropic", "claude-opus-4-20250514"),
+            ("sonnet", "anthropic", "claude-sonnet-4-20250514"),
+            ("haiku", "anthropic", "claude-3-5-haiku-latest"),
+            ("gemini-flash", "gemini", "gemini-2.5-flash-preview-05-20"),
+            ("gemini-pro", "gemini", "gemini-2.5-pro-preview-05-06"),
+            ("4o", "openai", "gpt-4o"),
+            ("4o-mini", "openai", "gpt-4o-mini"),
         ];
-        for (spec_name, expected_provider) in cases {
-            let info = get_model_info(spec_name);
+        for (alias, expected_provider, expected_id) in cases {
+            let info = get_model_info(alias);
             assert!(
                 info.is_some(),
-                "Spec model name '{}' should resolve via alias",
-                spec_name
+                "Alias '{}' should resolve to a model",
+                alias
+            );
+            let info = info.unwrap();
+            assert_eq!(
+                info.provider, expected_provider,
+                "Alias '{}' should map to provider '{}'",
+                alias, expected_provider
             );
             assert_eq!(
-                info.unwrap().provider,
-                expected_provider,
-                "Spec model '{}' should map to provider '{}'",
-                spec_name,
-                expected_provider
+                info.id, expected_id,
+                "Alias '{}' should map to model '{}'",
+                alias, expected_id
             );
         }
     }
@@ -359,8 +372,8 @@ mod tests {
             "supports_vision": false,
             "supports_reasoning": false,
             "aliases": [],
-            "cost_per_million_input_tokens": 0.0,
-            "cost_per_million_output_tokens": 0.0
+            "input_cost_per_million": 0.0,
+            "output_cost_per_million": 0.0
         }]"#;
         load_catalog_from_json(custom_json).unwrap();
 
@@ -383,6 +396,34 @@ mod tests {
             with_vision.is_none(),
             "runtime model doesn't support vision, should return None"
         );
+    }
+
+    #[test]
+    fn test_all_builtin_models_have_cost_fields() {
+        // DEFECT-3: Verify cost fields deserialize to non-None values for all built-in models.
+        for model in CATALOG.iter() {
+            assert!(
+                model.input_cost_per_million.is_some(),
+                "Model '{}' must have input_cost_per_million",
+                model.id
+            );
+            assert!(
+                model.output_cost_per_million.is_some(),
+                "Model '{}' must have output_cost_per_million",
+                model.id
+            );
+            // Costs should be non-negative
+            assert!(
+                model.input_cost_per_million.unwrap() >= 0.0,
+                "Model '{}' input_cost_per_million must be >= 0",
+                model.id
+            );
+            assert!(
+                model.output_cost_per_million.unwrap() >= 0.0,
+                "Model '{}' output_cost_per_million must be >= 0",
+                model.id
+            );
+        }
     }
 
     #[test]

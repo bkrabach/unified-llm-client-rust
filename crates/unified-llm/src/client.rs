@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use unified_llm_types::{
-    BoxFuture, BoxStream, Error, ProviderAdapter, Request, Response, StreamEvent,
+    AdapterTimeout, BoxFuture, BoxStream, Error, ProviderAdapter, Request, Response, StreamEvent,
 };
 
 use crate::middleware::{Middleware, Next};
@@ -106,6 +106,11 @@ impl Client {
     /// 2. `OPENAI_API_KEY` → OpenAI adapter
     /// 3. `GEMINI_API_KEY` (fallback: `GOOGLE_API_KEY`) → Gemini adapter
     ///
+    /// **Timeout configuration** (optional, shared across all adapters):
+    /// - `UNIFIED_LLM_CONNECT_TIMEOUT` — connection timeout in seconds (default: 10)
+    /// - `UNIFIED_LLM_REQUEST_TIMEOUT` — request timeout in seconds (default: 120)
+    /// - `UNIFIED_LLM_STREAM_READ_TIMEOUT` — per-chunk stream read timeout in seconds (default: 30)
+    ///
     /// Only providers whose keys are present are registered. If no keys are
     /// found, returns `ConfigurationError`.
     ///
@@ -113,16 +118,21 @@ impl Client {
     /// use `ClientBuilder` with explicit `.default_provider()` instead.
     pub fn from_env() -> Result<Self, Error> {
         let mut builder = ClientBuilder::new();
+        let timeout = Self::timeout_from_env();
 
         #[cfg(feature = "anthropic")]
         if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
             let adapter = if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
-                crate::providers::anthropic::AnthropicAdapter::new_with_base_url(
+                crate::providers::anthropic::AnthropicAdapter::new_with_base_url_and_timeout(
                     secrecy::SecretString::from(key),
                     base_url,
+                    timeout.clone(),
                 )
             } else {
-                crate::providers::anthropic::AnthropicAdapter::new(secrecy::SecretString::from(key))
+                crate::providers::anthropic::AnthropicAdapter::new_with_timeout(
+                    secrecy::SecretString::from(key),
+                    timeout.clone(),
+                )
             };
             builder = builder.provider("anthropic", Box::new(adapter));
         }
@@ -131,6 +141,7 @@ impl Client {
         if let Ok(key) = std::env::var("OPENAI_API_KEY") {
             let mut adapter_builder =
                 crate::providers::openai::OpenAiAdapter::builder(secrecy::SecretString::from(key));
+            adapter_builder = adapter_builder.timeout(timeout.clone());
             if let Ok(base_url) = std::env::var("OPENAI_BASE_URL") {
                 // The OpenAI adapter appends "/v1/responses" internally, so strip
                 // a trailing "/v1" or "/v1/" from the env var to avoid double-path
@@ -166,17 +177,41 @@ impl Client {
             std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY"))
         {
             let adapter = if let Ok(base_url) = std::env::var("GEMINI_BASE_URL") {
-                crate::providers::gemini::GeminiAdapter::new_with_base_url(
+                crate::providers::gemini::GeminiAdapter::new_with_base_url_and_timeout(
                     secrecy::SecretString::from(key),
                     base_url,
+                    timeout,
                 )
             } else {
-                crate::providers::gemini::GeminiAdapter::new(secrecy::SecretString::from(key))
+                crate::providers::gemini::GeminiAdapter::new_with_timeout(
+                    secrecy::SecretString::from(key),
+                    timeout,
+                )
             };
             builder = builder.provider("gemini", Box::new(adapter));
         }
 
         builder.build()
+    }
+
+    /// Parse timeout configuration from environment variables.
+    /// Falls back to `AdapterTimeout::default()` for any unset or unparseable values.
+    fn timeout_from_env() -> AdapterTimeout {
+        let defaults = AdapterTimeout::default();
+        AdapterTimeout {
+            connect: std::env::var("UNIFIED_LLM_CONNECT_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(defaults.connect),
+            request: std::env::var("UNIFIED_LLM_REQUEST_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(defaults.request),
+            stream_read: std::env::var("UNIFIED_LLM_STREAM_READ_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(defaults.stream_read),
+        }
     }
 
     /// Send a completion request, routing to the appropriate provider.

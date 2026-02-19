@@ -45,7 +45,7 @@ where
 
                 // If retry_after exceeds max_delay, raise immediately
                 if let Some(retry_after) = &err.retry_after {
-                    if retry_after.as_secs_f64() > policy.max_delay {
+                    if retry_after.as_secs_f64() >= policy.max_delay {
                         return Err(err);
                     }
                 }
@@ -413,6 +413,46 @@ mod tests {
                 attempt
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_retry_after_equal_to_max_delay_raises_immediately() {
+        // DEFECT-2: Spec §6.6 says "If Retry-After >= max_delay: raise immediately."
+        // retry_after=60s, max_delay=60.0 — should NOT retry.
+        let policy = RetryPolicy {
+            max_retries: 3,
+            base_delay: 0.001,
+            max_delay: 60.0,
+            backoff_multiplier: 2.0,
+            jitter: false,
+            on_retry: None,
+        };
+        let attempt = Arc::new(AtomicU32::new(0));
+        let attempt_clone = attempt.clone();
+
+        let result: Result<i32, Error> = with_retry(&policy, || {
+            let attempt = attempt_clone.clone();
+            async move {
+                attempt.fetch_add(1, Ordering::SeqCst);
+                // retry_after of 60 seconds == max_delay of 60 seconds
+                Err(Error::from_http_status(
+                    429,
+                    "Rate limited".into(),
+                    "test",
+                    None,
+                    Some(Duration::from_secs(60)),
+                ))
+            }
+        })
+        .await;
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::RateLimit);
+        assert_eq!(
+            attempt.load(Ordering::SeqCst),
+            1,
+            "Should NOT retry when retry_after == max_delay"
+        );
     }
 
     #[tokio::test]
