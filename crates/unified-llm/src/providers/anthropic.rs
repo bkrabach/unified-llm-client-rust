@@ -195,7 +195,10 @@ impl AnthropicAdapter {
     }
 
     /// Perform the actual HTTP request for complete().
-    async fn do_complete(&self, request: Request) -> Result<Response, Error> {
+    async fn do_complete(&self, mut request: Request) -> Result<Response, Error> {
+        // H-4: Pre-resolve local file images to avoid blocking I/O in translate_request.
+        crate::util::image::pre_resolve_local_images(&mut request.messages).await?;
+
         let url = format!("{}/v1/messages", self.base_url);
         let beta_headers = collect_beta_headers(&request);
         let body = translate_request_with_cache(&request);
@@ -230,8 +233,14 @@ impl AnthropicAdapter {
     }
 
     /// Perform the HTTP request for stream() and return a stream of events.
-    fn do_stream(&self, request: Request) -> BoxStream<'_, Result<StreamEvent, Error>> {
+    fn do_stream(&self, mut request: Request) -> BoxStream<'_, Result<StreamEvent, Error>> {
         let stream = async_stream::stream! {
+            // H-4: Pre-resolve local file images to avoid blocking I/O in translate_request.
+            if let Err(e) = crate::util::image::pre_resolve_local_images(&mut request.messages).await {
+                yield Err(e);
+                return;
+            }
+
             let url = format!("{}/v1/messages", self.base_url);
             let beta_headers = collect_beta_headers(&request);
             let mut body = translate_request_with_cache(&request);

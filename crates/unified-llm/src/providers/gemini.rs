@@ -119,6 +119,11 @@ impl GeminiAdapter {
     }
 
     /// Build common HTTP headers for Gemini API requests.
+    ///
+    // DEVIATION FROM SPEC: Spec §7 suggests query parameter authentication for Gemini.
+    // We use x-goog-api-key header instead — this is Google's recommended approach
+    // and avoids leaking API keys in server access logs, proxy logs, and browser history.
+    // Both methods are supported by the Gemini API.
     fn build_headers(&self) -> Result<reqwest::header::HeaderMap, Error> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
@@ -154,7 +159,10 @@ impl GeminiAdapter {
     }
 
     /// Perform the actual HTTP request for complete().
-    async fn do_complete(&self, request: Request) -> Result<Response, Error> {
+    async fn do_complete(&self, mut request: Request) -> Result<Response, Error> {
+        // H-4: Pre-resolve local file images to avoid blocking I/O in translate_request.
+        crate::util::image::pre_resolve_local_images(&mut request.messages).await?;
+
         // Pre-populate tool_call_map from conversation history.
         // This makes the adapter stateless across requests — each request
         // carries enough context to resolve synthetic IDs.
@@ -217,7 +225,7 @@ impl GeminiAdapter {
     }
 
     /// Perform the HTTP request for stream() and return a stream of events.
-    fn do_stream(&self, request: Request) -> BoxStream<'_, Result<StreamEvent, Error>> {
+    fn do_stream(&self, mut request: Request) -> BoxStream<'_, Result<StreamEvent, Error>> {
         // Pre-populate tool_call_map from conversation history.
         {
             let mut map = self.tool_call_map.lock().unwrap_or_else(|e| e.into_inner());
@@ -233,6 +241,12 @@ impl GeminiAdapter {
             }
         }
         let stream = async_stream::stream! {
+            // H-4: Pre-resolve local file images to avoid blocking I/O in translate_request.
+            if let Err(e) = crate::util::image::pre_resolve_local_images(&mut request.messages).await {
+                yield Err(e);
+                return;
+            }
+
             let url = self.build_stream_url(&request.model);
             let body = {
                 let map = self.tool_call_map.lock().unwrap_or_else(|e| e.into_inner());

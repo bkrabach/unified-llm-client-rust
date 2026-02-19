@@ -96,7 +96,10 @@ impl OpenAICompatibleAdapter {
     }
 
     /// Perform the actual HTTP request for complete().
-    async fn do_complete(&self, request: Request) -> Result<Response, Error> {
+    async fn do_complete(&self, mut request: Request) -> Result<Response, Error> {
+        // H-4: Pre-resolve local file images to avoid blocking I/O in translate_request.
+        crate::util::image::pre_resolve_local_images(&mut request.messages).await?;
+
         let url = format!("{}/v1/chat/completions", self.base_url);
         let body = translate_request(&request);
 
@@ -205,8 +208,14 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
         Box::pin(self.do_complete(request))
     }
 
-    fn stream(&self, request: Request) -> BoxStream<'_, Result<StreamEvent, Error>> {
+    fn stream(&self, mut request: Request) -> BoxStream<'_, Result<StreamEvent, Error>> {
         let stream = async_stream::stream! {
+            // H-4: Pre-resolve local file images to avoid blocking I/O in translate_request.
+            if let Err(e) = crate::util::image::pre_resolve_local_images(&mut request.messages).await {
+                yield Err(e);
+                return;
+            }
+
             let url = format!("{}/v1/chat/completions", self.base_url);
             let mut body = translate_request(&request);
 

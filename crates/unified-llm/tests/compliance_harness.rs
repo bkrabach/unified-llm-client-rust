@@ -684,24 +684,24 @@ async fn compliance_8_9_8_streaming_tools_gemini() {
 }
 
 // ---------------------------------------------------------------------------
-// §8.9.11 + §8.9.12 — Error handling × 3 providers
+// Error handling — 404 (nonexistent model) × 3 providers
 //
-// W-10: The spec says §8.9.11 is "invalid API key → 401". However, testing
-// invalid API keys against real APIs risks triggering rate limiting or account
-// flags. Instead we test with a nonexistent model (→ 404 NotFound) which
-// equally proves the error-handling pipeline works: HTTP error → structured
-// Error with correct ErrorKind, provider, and non-empty message.
+// These tests verify the error-handling pipeline using a nonexistent model
+// (→ 404 NotFound): HTTP error → structured Error with correct ErrorKind,
+// provider, and non-empty message.
+//
+// NOTE: These do NOT validate §8.9.11 (invalid API key → 401) or §8.9.12
+// (rate limit → 429). See the real §8.9.11 tests below and the conformance.rs
+// wiremock tests for §8.9.12.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore]
-async fn compliance_8_9_11_12_error_handling_openai() {
+async fn compliance_error_handling_404_openai() {
     use unified_llm_types::ErrorKind;
 
     let client = require_client();
 
-    // W-10: Uses nonexistent model (404) instead of invalid API key (401)
-    // to avoid account-level side effects. See comment above.
     let opts = GenerateOptions::new("nonexistent-model-xyz-9999")
         .prompt("test")
         .provider("openai")
@@ -714,7 +714,6 @@ async fn compliance_8_9_11_12_error_handling_openai() {
         "openai: should error for nonexistent model"
     );
     let error = result.unwrap_err();
-    // §8.9.11: structured error, not a panic
     assert_eq!(
         error.kind,
         ErrorKind::NotFound,
@@ -722,18 +721,16 @@ async fn compliance_8_9_11_12_error_handling_openai() {
         error.kind,
         error.message
     );
-    // §8.9.12: error message is non-empty
     assert!(
         !error.message.is_empty(),
         "openai: error message should be non-empty"
     );
-    dod_pass("8.9.11/openai");
-    dod_pass("8.9.12/openai");
+    dod_pass("error_handling_404/openai");
 }
 
 #[tokio::test]
 #[ignore]
-async fn compliance_8_9_11_12_error_handling_anthropic() {
+async fn compliance_error_handling_404_anthropic() {
     use unified_llm_types::ErrorKind;
 
     let client = require_client();
@@ -761,13 +758,12 @@ async fn compliance_8_9_11_12_error_handling_anthropic() {
         !error.message.is_empty(),
         "anthropic: error message should be non-empty"
     );
-    dod_pass("8.9.11/anthropic");
-    dod_pass("8.9.12/anthropic");
+    dod_pass("error_handling_404/anthropic");
 }
 
 #[tokio::test]
 #[ignore]
-async fn compliance_8_9_11_12_error_handling_gemini() {
+async fn compliance_error_handling_404_gemini() {
     use unified_llm_types::ErrorKind;
 
     let client = require_client();
@@ -797,9 +793,97 @@ async fn compliance_8_9_11_12_error_handling_gemini() {
         !error.message.is_empty(),
         "gemini: error message should be non-empty"
     );
-    dod_pass("8.9.11/gemini");
-    dod_pass("8.9.12/gemini");
+    dod_pass("error_handling_404/gemini");
 }
+
+// ---------------------------------------------------------------------------
+// §8.9.11 — Authentication error (invalid API key → 401) × 3 providers
+//
+// These tests use deliberately invalid API keys to verify the error-handling
+// pipeline correctly classifies 401 responses as ErrorKind::Authentication
+// with retryable=false.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_11_auth_error_openai() {
+    use secrecy::SecretString;
+    use unified_llm::providers::openai::OpenAiAdapter;
+
+    let adapter = OpenAiAdapter::new(SecretString::from("sk-invalid-key-for-testing-000"));
+    let client = Client::builder()
+        .provider("openai", Box::new(adapter))
+        .build()
+        .unwrap();
+    let opts = GenerateOptions::new("gpt-4o-mini")
+        .prompt("test")
+        .provider("openai")
+        .max_retries(0);
+    let err = unified_llm::generate(opts, &client).await.unwrap_err();
+    assert_eq!(err.kind, unified_llm_types::ErrorKind::Authentication);
+    assert!(!err.retryable);
+    dod_pass("8.9.11/openai");
+}
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_11_auth_error_anthropic() {
+    use secrecy::SecretString;
+    use unified_llm::providers::anthropic::AnthropicAdapter;
+
+    let adapter = AnthropicAdapter::new(SecretString::from("sk-ant-invalid-key-for-testing-000"));
+    let client = Client::builder()
+        .provider("anthropic", Box::new(adapter))
+        .build()
+        .unwrap();
+    let opts = GenerateOptions::new("claude-3-5-haiku-latest")
+        .prompt("test")
+        .provider("anthropic")
+        .max_retries(0);
+    let err = unified_llm::generate(opts, &client).await.unwrap_err();
+    assert_eq!(err.kind, unified_llm_types::ErrorKind::Authentication);
+    assert!(!err.retryable);
+    dod_pass("8.9.11/anthropic");
+}
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_11_auth_error_gemini() {
+    use secrecy::SecretString;
+    use unified_llm::providers::gemini::GeminiAdapter;
+
+    let adapter = GeminiAdapter::new(SecretString::from("invalid-gemini-key-for-testing-000"));
+    let client = Client::builder()
+        .provider("gemini", Box::new(adapter))
+        .build()
+        .unwrap();
+    let opts = GenerateOptions::new("gemini-2.0-flash")
+        .prompt("test")
+        .provider("gemini")
+        .max_retries(0);
+    let err = unified_llm::generate(opts, &client).await.unwrap_err();
+    // Gemini may return Authentication or AccessDenied depending on key format
+    assert!(
+        err.kind == unified_llm_types::ErrorKind::Authentication
+            || err.kind == unified_llm_types::ErrorKind::AccessDenied,
+        "gemini: expected Authentication or AccessDenied, got {:?}: {}",
+        err.kind,
+        err.message
+    );
+    assert!(!err.retryable);
+    dod_pass("8.9.11/gemini");
+}
+
+// ---------------------------------------------------------------------------
+// §8.9.12 — Rate limit (429) handling
+//
+// Rate limit errors (429) are difficult to trigger reliably against real APIs
+// without burning quota. §8.9.12 is validated via wiremock in conformance.rs
+// which has dedicated 429 tests for all 3 providers:
+//   - conformance_openai_429_rate_limit
+//   - conformance_anthropic_429_rate_limit
+//   - conformance_gemini_429_rate_limit
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // §8.9.9 — Structured output (generate_object) × OpenAI, Gemini

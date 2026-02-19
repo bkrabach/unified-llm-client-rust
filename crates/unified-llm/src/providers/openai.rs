@@ -134,7 +134,10 @@ impl OpenAiAdapter {
     }
 
     /// Perform the actual HTTP request for complete().
-    async fn do_complete(&self, request: Request) -> Result<Response, Error> {
+    async fn do_complete(&self, mut request: Request) -> Result<Response, Error> {
+        // H-4: Pre-resolve local file images to avoid blocking I/O in translate_request.
+        crate::util::image::pre_resolve_local_images(&mut request.messages).await?;
+
         let url = format!("{}/v1/responses", self.base_url);
         let body = translate_request(&request);
 
@@ -168,8 +171,14 @@ impl OpenAiAdapter {
     }
 
     /// Perform the HTTP request for stream() and return a stream of events.
-    fn do_stream(&self, request: Request) -> BoxStream<'_, Result<StreamEvent, Error>> {
+    fn do_stream(&self, mut request: Request) -> BoxStream<'_, Result<StreamEvent, Error>> {
         let stream = async_stream::stream! {
+            // H-4: Pre-resolve local file images to avoid blocking I/O in translate_request.
+            if let Err(e) = crate::util::image::pre_resolve_local_images(&mut request.messages).await {
+                yield Err(e);
+                return;
+            }
+
             let url = format!("{}/v1/responses", self.base_url);
             let mut body = translate_request(&request);
             // Add stream: true to the request body
@@ -1132,6 +1141,10 @@ impl OpenAiStreamTranslator {
                 });
             }
 
+            // NOTE: response.in_progress and other informational SSE events are handled
+            // by the catch-all arm which emits them as ProviderEvent. This is intentional —
+            // these events carry no content deltas and are purely informational.
+            //
             // Forward unknown SSE events as PROVIDER_EVENT (spec §3.13, M-4)
             _ => {
                 events.push(StreamEvent {
