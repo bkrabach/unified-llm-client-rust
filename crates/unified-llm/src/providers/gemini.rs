@@ -2007,6 +2007,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_error_400_api_key_not_valid_maps_to_authentication() {
+        // Gemini returns HTTP 400 (not 401) with INVALID_ARGUMENT when the API
+        // key is syntactically wrong.  Message-based reclassification in
+        // Error::from_http_status should promote this to Authentication.
+        let body = serde_json::json!({
+            "error": {
+                "code": 400,
+                "message": "API key not valid. Please pass a valid API key.",
+                "status": "INVALID_ARGUMENT"
+            }
+        });
+        let err = parse_error(400, &reqwest::header::HeaderMap::new(), body);
+        assert_eq!(
+            err.kind,
+            ErrorKind::Authentication,
+            "400 + 'API key not valid' should be reclassified to Authentication"
+        );
+        assert!(!err.retryable);
+        assert_eq!(err.error_code, Some("INVALID_ARGUMENT".to_string()));
+    }
+
+    #[test]
     fn test_parse_error_401() {
         let body = serde_json::json!({
             "error": {

@@ -216,7 +216,10 @@ impl Error {
         let lower = message.to_lowercase();
         if lower.contains("not found") || lower.contains("does not exist") {
             ErrorKind::NotFound
-        } else if lower.contains("unauthorized") || lower.contains("invalid key") {
+        } else if lower.contains("unauthorized")
+            || lower.contains("invalid key")
+            || lower.contains("api key not valid")
+        {
             ErrorKind::Authentication
         } else if lower.contains("context length")
             || lower.contains("context window")
@@ -508,6 +511,27 @@ mod tests {
     fn test_message_classification_insufficient_funds() {
         let err = Error::from_http_status(400, "insufficient funds".into(), "test", None, None);
         assert_eq!(err.kind, ErrorKind::QuotaExceeded);
+        assert!(!err.retryable);
+    }
+
+    // --- Gemini 400 "API key not valid" should map to Authentication ---
+
+    #[test]
+    fn test_message_classification_api_key_not_valid() {
+        // Gemini returns HTTP 400 (not 401) for invalid API keys with message
+        // "API key not valid. Please pass a valid API key."
+        let err = Error::from_http_status(
+            400,
+            "API key not valid. Please pass a valid API key.".into(),
+            "gemini",
+            None,
+            None,
+        );
+        assert_eq!(
+            err.kind,
+            ErrorKind::Authentication,
+            "HTTP 400 with 'API key not valid' should be reclassified to Authentication"
+        );
         assert!(!err.retryable);
     }
 
