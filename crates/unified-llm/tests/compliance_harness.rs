@@ -1397,6 +1397,248 @@ async fn compliance_8_9_3_image_base64_gemini() {
 }
 
 // ---------------------------------------------------------------------------
+// §8.6.9 — Multi-turn prompt caching × OpenAI (real API)
+//
+// Same pattern as the Anthropic test: 6 turns with a large system prompt,
+// verify cache_read_tokens > 0 on turn 5+.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_6_9_multi_turn_caching_openai() {
+    use unified_llm_types::Message;
+
+    let client = require_client();
+    let system_text = "You are a helpful assistant. ".repeat(100);
+    let mut messages = vec![Message::system(&system_text)];
+
+    for turn in 1..=6 {
+        messages.push(Message::user(format!(
+            "Turn {turn}: What is {turn} + {turn}?"
+        )));
+        let result = with_compliance_retry(3, 2, || {
+            let opts = GenerateOptions::new(OPENAI_MODEL)
+                .messages(messages.clone())
+                .max_tokens(100)
+                .provider("openai");
+            let client = &client;
+            async move { unified_llm::generate(opts, client).await }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("Turn {turn} failed: {e:?}"));
+
+        messages.push(Message::assistant(&result.text));
+
+        if turn >= 5 {
+            let cache_read = result.usage.cache_read_tokens.unwrap_or(0);
+            let input = result.usage.input_tokens;
+            let ratio = if input > 0 {
+                cache_read as f64 / input as f64 * 100.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "[CACHE] Turn {turn}: cache_read={cache_read}, input={input}, ratio={ratio:.1}%"
+            );
+
+            assert!(
+                cache_read > 0,
+                "Turn {turn}: expected some cache_read_tokens, got 0"
+            );
+            if cache_read < input / 2 {
+                eprintln!("WARN: Turn {turn} cache ratio {ratio:.1}% is below 50% target");
+            }
+        }
+    }
+    dod_pass("8.6.9/openai");
+}
+
+// ---------------------------------------------------------------------------
+// §8.6.9 — Multi-turn prompt caching × Gemini (real API)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_6_9_multi_turn_caching_gemini() {
+    use unified_llm_types::Message;
+
+    let client = require_client();
+    let system_text = "You are a helpful assistant. ".repeat(100);
+    let mut messages = vec![Message::system(&system_text)];
+
+    for turn in 1..=6 {
+        messages.push(Message::user(format!(
+            "Turn {turn}: What is {turn} + {turn}?"
+        )));
+        let result = with_compliance_retry(3, 2, || {
+            let opts = GenerateOptions::new(GEMINI_MODEL)
+                .messages(messages.clone())
+                .max_tokens(100)
+                .provider("gemini");
+            let client = &client;
+            async move { unified_llm::generate(opts, client).await }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("Turn {turn} failed: {e:?}"));
+
+        messages.push(Message::assistant(&result.text));
+
+        if turn >= 5 {
+            let cache_read = result.usage.cache_read_tokens.unwrap_or(0);
+            let input = result.usage.input_tokens;
+            let ratio = if input > 0 {
+                cache_read as f64 / input as f64 * 100.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "[CACHE] Turn {turn}: cache_read={cache_read}, input={input}, ratio={ratio:.1}%"
+            );
+
+            assert!(
+                cache_read > 0,
+                "Turn {turn}: expected some cache_read_tokens, got 0"
+            );
+            if cache_read < input / 2 {
+                eprintln!("WARN: Turn {turn} cache ratio {ratio:.1}% is below 50% target");
+            }
+        }
+    }
+    dod_pass("8.6.9/gemini");
+}
+
+// ---------------------------------------------------------------------------
+// §8.9.4 — Image URL input × 3 providers
+// ---------------------------------------------------------------------------
+
+/// A well-known, stable public image URL for integration testing.
+const TEST_IMAGE_URL: &str =
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png";
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_4_image_url_anthropic() {
+    use unified_llm_types::{ContentPart, Message, Role};
+
+    let client = require_client();
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentPart::text("What do you see in this image?"),
+            ContentPart::image_url(TEST_IMAGE_URL),
+        ],
+        name: None,
+        tool_call_id: None,
+    }];
+
+    let result = with_compliance_retry(3, 2, || {
+        let msgs = messages.clone();
+        let client = &client;
+        async move {
+            unified_llm::generate(
+                GenerateOptions::new(ANTHROPIC_MODEL)
+                    .messages(msgs)
+                    .max_tokens(200)
+                    .provider("anthropic"),
+                client,
+            )
+            .await
+        }
+    })
+    .await
+    .expect("Image URL anthropic failed");
+
+    assert!(
+        !result.text.is_empty(),
+        "anthropic: should respond to image URL"
+    );
+    dod_pass("8.9.4/anthropic");
+}
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_4_image_url_openai() {
+    use unified_llm_types::{ContentPart, Message, Role};
+
+    let client = require_client();
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentPart::text("What do you see in this image?"),
+            ContentPart::image_url(TEST_IMAGE_URL),
+        ],
+        name: None,
+        tool_call_id: None,
+    }];
+
+    let result = with_compliance_retry(3, 2, || {
+        let msgs = messages.clone();
+        let client = &client;
+        async move {
+            unified_llm::generate(
+                GenerateOptions::new(OPENAI_MODEL)
+                    .messages(msgs)
+                    .max_tokens(200)
+                    .provider("openai"),
+                client,
+            )
+            .await
+        }
+    })
+    .await
+    .expect("Image URL openai failed");
+
+    assert!(
+        !result.text.is_empty(),
+        "openai: should respond to image URL"
+    );
+    dod_pass("8.9.4/openai");
+}
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_4_image_url_gemini() {
+    use unified_llm_types::{ContentPart, Message, Role};
+
+    let client = require_client();
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentPart::text("What do you see in this image?"),
+            ContentPart::image_url(TEST_IMAGE_URL),
+        ],
+        name: None,
+        tool_call_id: None,
+    }];
+
+    let result = with_compliance_retry(3, 2, || {
+        let msgs = messages.clone();
+        let client = &client;
+        async move {
+            unified_llm::generate(
+                GenerateOptions::new(GEMINI_MODEL)
+                    .messages(msgs)
+                    .max_tokens(200)
+                    .provider("gemini"),
+                client,
+            )
+            .await
+        }
+    })
+    .await
+    .expect("Image URL gemini failed");
+
+    assert!(
+        !result.text.is_empty(),
+        "gemini: should respond to image URL"
+    );
+    dod_pass("8.9.4/gemini");
+}
+
+// ---------------------------------------------------------------------------
 // §8.9.7 — Multi-step tool loop (3+ rounds) × 3 providers
 // ---------------------------------------------------------------------------
 

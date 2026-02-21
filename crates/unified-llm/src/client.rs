@@ -143,14 +143,9 @@ impl Client {
                 crate::providers::openai::OpenAiAdapter::builder(secrecy::SecretString::from(key));
             adapter_builder = adapter_builder.timeout(timeout.clone());
             if let Ok(base_url) = std::env::var("OPENAI_BASE_URL") {
-                // The OpenAI adapter appends "/v1/responses" internally, so strip
-                // a trailing "/v1" or "/v1/" from the env var to avoid double-path
-                // (e.g. "https://api.openai.com/v1" → "https://api.openai.com").
-                let normalized = base_url
-                    .strip_suffix("/v1/")
-                    .or_else(|| base_url.strip_suffix("/v1"))
-                    .unwrap_or(&base_url);
-                adapter_builder = adapter_builder.base_url(normalized);
+                // The adapter's build() normalizes the URL (strips trailing slashes,
+                // /v1, /v1beta) so we pass the raw value here.
+                adapter_builder = adapter_builder.base_url(base_url);
             }
             // Wire OPENAI_ORG_ID and OPENAI_PROJECT_ID as default headers (H-8 enables this).
             let org_id = std::env::var("OPENAI_ORG_ID").ok();
@@ -218,6 +213,7 @@ impl Client {
     /// If middleware is registered, runs the onion chain (request phase in
     /// registration order, response phase in reverse order).
     pub async fn complete(&self, request: Request) -> Result<Response, Error> {
+        request.validate()?;
         let provider = self.resolve_provider(&request)?;
 
         if self.middleware.is_empty() {
@@ -258,6 +254,7 @@ impl Client {
         &self,
         request: Request,
     ) -> Result<BoxStream<'_, Result<StreamEvent, Error>>, Error> {
+        request.validate()?;
         let provider = self.resolve_provider(&request)?;
 
         if self.middleware.is_empty() {
@@ -396,7 +393,11 @@ mod tests {
             .unwrap();
 
         let resp = client
-            .complete(Request::default().model("test"))
+            .complete(
+                Request::default()
+                    .model("test")
+                    .messages(vec![Message::user("Hi")]),
+            )
             .await
             .unwrap();
         assert_eq!(resp.text(), "Hello");
@@ -415,7 +416,10 @@ mod tests {
             .unwrap();
 
         // Route to b explicitly
-        let req = Request::default().model("test").provider(Some("b".into()));
+        let req = Request::default()
+            .model("test")
+            .messages(vec![Message::user("Hi")])
+            .provider(Some("b".into()));
         let resp = client.complete(req).await.unwrap();
         assert_eq!(resp.provider, "b");
         assert_eq!(resp.text(), "From B");
@@ -431,6 +435,7 @@ mod tests {
 
         let req = Request::default()
             .model("test")
+            .messages(vec![Message::user("Hi")])
             .provider(Some("nonexistent".into()));
         let err = client.complete(req).await.unwrap_err();
         assert_eq!(err.kind, ErrorKind::Configuration);
@@ -455,7 +460,11 @@ mod tests {
         };
 
         let err = client
-            .complete(Request::default().model("test"))
+            .complete(
+                Request::default()
+                    .model("test")
+                    .messages(vec![Message::user("Hi")]),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Configuration);
@@ -510,7 +519,11 @@ mod tests {
 
         // No provider specified, should use default "a"
         let resp = client
-            .complete(Request::default().model("test"))
+            .complete(
+                Request::default()
+                    .model("test")
+                    .messages(vec![Message::user("Hi")]),
+            )
             .await
             .unwrap();
         assert_eq!(resp.provider, "a");

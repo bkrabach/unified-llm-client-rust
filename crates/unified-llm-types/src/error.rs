@@ -232,6 +232,13 @@ impl Error {
         }
     }
 
+    /// Reclassify an error kind based on the error message body.
+    /// Public so provider adapters can apply message-based reclassification
+    /// after gRPC/provider-specific overrides.
+    pub fn classify_by_message_pub(message: &str, default: ErrorKind) -> ErrorKind {
+        Self::classify_by_message(message, default)
+    }
+
     fn classify_by_message(message: &str, default: ErrorKind) -> ErrorKind {
         let lower = message.to_lowercase();
         if lower.contains("not found") || lower.contains("does not exist") {

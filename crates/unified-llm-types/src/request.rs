@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::Error;
 use crate::message::Message;
 use crate::response::ResponseFormat;
 use crate::tool::{ToolChoice, ToolDefinition};
@@ -41,6 +42,21 @@ pub struct Request {
 }
 
 impl Request {
+    /// Validate that the request has the minimum required fields.
+    ///
+    /// Returns `ConfigurationError` if:
+    /// - `model` is empty or whitespace-only
+    /// - `messages` is empty
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.model.trim().is_empty() {
+            return Err(Error::configuration("Request model must not be empty"));
+        }
+        if self.messages.is_empty() {
+            return Err(Error::configuration("Request messages must not be empty"));
+        }
+        Ok(())
+    }
+
     /// Builder-style setter for model.
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
@@ -277,5 +293,49 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("abort_signal"));
+    }
+
+    // --- GAP-4: Request::validate() tests ---
+
+    #[test]
+    fn test_validate_ok() {
+        let req = Request::default()
+            .model("gpt-4")
+            .messages(vec![Message::user("Hello")]);
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_model() {
+        let req = Request::default()
+            .model("")
+            .messages(vec![Message::user("Hello")]);
+        let err = req.validate().unwrap_err();
+        assert_eq!(err.kind, crate::ErrorKind::Configuration);
+        assert!(err.message.contains("model"));
+    }
+
+    #[test]
+    fn test_validate_whitespace_model() {
+        let req = Request::default()
+            .model("   ")
+            .messages(vec![Message::user("Hello")]);
+        let err = req.validate().unwrap_err();
+        assert_eq!(err.kind, crate::ErrorKind::Configuration);
+        assert!(err.message.contains("model"));
+    }
+
+    #[test]
+    fn test_validate_empty_messages() {
+        let req = Request::default().model("gpt-4");
+        let err = req.validate().unwrap_err();
+        assert_eq!(err.kind, crate::ErrorKind::Configuration);
+        assert!(err.message.contains("messages"));
+    }
+
+    #[test]
+    fn test_validate_default_request_fails() {
+        let req = Request::default();
+        assert!(req.validate().is_err());
     }
 }

@@ -9,7 +9,7 @@ use crate::util::sse::SseParser;
 use unified_llm_types::{
     AdapterTimeout, ArgumentValue, BoxFuture, BoxStream, ContentPart, Error, FinishReason, Message,
     ProviderAdapter, Request, Response, Role, StreamEvent, StreamEventType, ToolCall, ToolCallData,
-    Usage,
+    Usage, Warning,
 };
 
 /// OpenAI-compatible Chat Completions adapter for third-party services.
@@ -42,7 +42,7 @@ impl OpenAICompatibleAdapter {
         let timeout = AdapterTimeout::default();
         Self {
             api_key,
-            base_url: base_url.into(),
+            base_url: crate::util::normalize_base_url(&base_url.into()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
             http_client: Self::build_http_client(&timeout),
         }
@@ -56,7 +56,7 @@ impl OpenAICompatibleAdapter {
     ) -> Self {
         Self {
             api_key,
-            base_url: base_url.into(),
+            base_url: crate::util::normalize_base_url(&base_url.into()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
             http_client: Self::build_http_client(&timeout),
         }
@@ -101,7 +101,7 @@ impl OpenAICompatibleAdapter {
         crate::util::image::pre_resolve_local_images(&mut request.messages).await?;
 
         let url = format!("{}/v1/chat/completions", self.base_url);
-        let body = translate_request(&request);
+        let (body, translation_warnings) = translate_request(&request);
 
         let request_headers = self.build_headers()?;
 
@@ -130,7 +130,9 @@ impl OpenAICompatibleAdapter {
             .await
             .map_err(|e| Error::network(format!("Failed to parse response: {e}"), e))?;
 
-        parse_response(response_body, &headers)
+        let mut response = parse_response(response_body, &headers)?;
+        response.warnings = translation_warnings;
+        Ok(response)
     }
 
     /// Build common HTTP headers for Chat Completions API requests.
@@ -166,7 +168,7 @@ impl OpenAICompatibleAdapterBuilder {
     pub fn new(api_key: SecretString, base_url: impl Into<String>) -> Self {
         Self {
             api_key,
-            base_url: base_url.into(),
+            base_url: crate::util::normalize_base_url(&base_url.into()),
             timeout: None,
             default_headers: None,
         }
@@ -217,7 +219,7 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
             }
 
             let url = format!("{}/v1/chat/completions", self.base_url);
-            let mut body = translate_request(&request);
+            let (mut body, _translation_warnings) = translate_request(&request);
 
             // Enable streaming + request usage in stream
             if let Some(obj) = body.as_object_mut() {
@@ -326,8 +328,9 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
 // === Request Translation ===
 
 /// Translate a unified Request into a Chat Completions JSON body.
-pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
+pub(crate) fn translate_request(request: &Request) -> (serde_json::Value, Vec<Warning>) {
     let mut body = serde_json::Map::new();
+    let mut warnings: Vec<Warning> = Vec::new();
     body.insert("model".into(), json!(request.model));
 
     let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -347,7 +350,8 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
                 }));
             }
             Role::User => {
-                let content = translate_user_content(&msg.content);
+                let (content, mut part_warnings) = translate_user_content(&msg.content);
+                warnings.append(&mut part_warnings);
                 messages.push(json!({
                     "role": "user",
                     "content": content,
@@ -486,7 +490,7 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
                     "json_schema": {
                         "name": "response",
                         "schema": schema,
-                        "strict": true,
+                        "strict": fmt.strict,
                     }
                 }),
             );
@@ -508,23 +512,24 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
     ) {
         let mut body_val = serde_json::Value::Object(body);
         crate::util::provider_options::merge_provider_options(&mut body_val, &opts, INTERNAL_KEYS);
-        return body_val;
+        return (body_val, warnings);
     }
 
-    serde_json::Value::Object(body)
+    (serde_json::Value::Object(body), warnings)
 }
 
 /// Translate user content parts to Chat Completions format.
 ///
 /// For text-only messages, returns the text as a plain string (more compatible).
 /// For multimodal messages, returns an array of content parts.
-fn translate_user_content(parts: &[ContentPart]) -> serde_json::Value {
+fn translate_user_content(parts: &[ContentPart]) -> (serde_json::Value, Vec<Warning>) {
+    let mut warnings = Vec::new();
     let has_non_text = parts.iter().any(|p| !matches!(p, ContentPart::Text { .. }));
 
     if !has_non_text && parts.len() == 1 {
         // Simple text — return as string for maximum compatibility
         if let ContentPart::Text { text } = &parts[0] {
-            return json!(text);
+            return (json!(text), warnings);
         }
     }
 
@@ -571,11 +576,22 @@ fn translate_user_content(parts: &[ContentPart]) -> serde_json::Value {
                     })
                 }
             }
-            _ => None,
+            other => {
+                let msg = format!(
+                    "Dropped unsupported content part kind={:?} for provider=openai-compatible",
+                    other.kind()
+                );
+                tracing::warn!("{}", msg);
+                warnings.push(Warning {
+                    message: msg,
+                    code: Some("dropped_content_part".to_string()),
+                });
+                None
+            }
         })
         .collect();
 
-    json!(content_parts)
+    (json!(content_parts), warnings)
 }
 
 // === Response Translation ===
@@ -1025,7 +1041,12 @@ impl ChatCompletionsStreamTranslator {
                             .and_then(|d| d.get("reasoning_tokens"))
                             .and_then(|v| v.as_u64())
                             .map(|v| v as u32),
-                        cache_read_tokens: None,
+                        // BUG-1: Extract cached_tokens from streaming usage (was hardcoded None)
+                        cache_read_tokens: u
+                            .get("prompt_tokens_details")
+                            .and_then(|d| d.get("cached_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u32),
                         cache_write_tokens: None,
                         raw: Some(u.clone()),
                     }
@@ -1059,7 +1080,12 @@ impl ChatCompletionsStreamTranslator {
                         .and_then(|d| d.get("reasoning_tokens"))
                         .and_then(|v| v.as_u64())
                         .map(|v| v as u32),
-                    cache_read_tokens: None,
+                    // BUG-1: Extract cached_tokens from standalone usage chunk (was hardcoded None)
+                    cache_read_tokens: u
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32),
                     cache_write_tokens: None,
                     raw: Some(u.clone()),
                 };
@@ -1174,7 +1200,7 @@ mod tests {
             Message::system("You are helpful."),
             Message::user("Hi"),
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[0]["content"], "You are helpful.");
@@ -1194,7 +1220,7 @@ mod tests {
             },
             Message::user("Hi"),
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "developer");
         assert_eq!(messages[0]["content"], "Dev instructions");
@@ -1205,7 +1231,7 @@ mod tests {
         let request = Request::default()
             .model("gpt-4o")
             .messages(vec![Message::user("Hello world")]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "user");
         // Simple text-only → plain string (NOT array)
@@ -1219,7 +1245,7 @@ mod tests {
             Message::assistant("Hello!"),
             Message::user("How are you?"),
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[1]["role"], "assistant");
         assert_eq!(messages[1]["content"], "Hello!");
@@ -1231,7 +1257,7 @@ mod tests {
             .model("gpt-4o")
             .messages(vec![Message::user("hi")])
             .max_tokens(500);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["max_tokens"], 500);
         // NOT max_output_tokens (that's Responses API)
         assert!(body.get("max_output_tokens").is_none());
@@ -1243,7 +1269,7 @@ mod tests {
             .model("o3")
             .messages(vec![Message::user("think hard")])
             .reasoning_effort("high");
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert!(body.get("reasoning").is_none());
         assert!(body.get("reasoning_effort").is_none());
     }
@@ -1255,7 +1281,7 @@ mod tests {
             .messages(vec![Message::user("hi")])
             .temperature(0.7)
             .stop_sequences(vec!["END".into()]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["temperature"], 0.7);
         assert_eq!(body["stop"][0], "END");
     }
@@ -1277,7 +1303,7 @@ mod tests {
             .model("gpt-4o")
             .messages(vec![Message::user("weather?")])
             .tools(vec![make_test_tool()]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["type"], "function");
@@ -1310,7 +1336,7 @@ mod tests {
                 tool_call_id: None,
             },
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let messages = body["messages"].as_array().unwrap();
         let tc = &messages[1]["tool_calls"][0];
         assert_eq!(tc["id"], "call_123");
@@ -1341,7 +1367,7 @@ mod tests {
             },
             Message::tool_result("call_123", "72F sunny", false),
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let messages = body["messages"].as_array().unwrap();
         let tool_msg = &messages[2];
         assert_eq!(tool_msg["role"], "tool");
@@ -1360,7 +1386,7 @@ mod tests {
                     mode: mode.to_string(),
                     tool_name: None,
                 });
-            let body = translate_request(&request);
+            let (body, _) = translate_request(&request);
             assert_eq!(body["tool_choice"], *mode);
         }
     }
@@ -1375,7 +1401,7 @@ mod tests {
                 mode: "named".into(),
                 tool_name: Some("get_weather".into()),
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         // Nested format: function.name (NOT flat name like Responses API)
         assert_eq!(body["tool_choice"]["type"], "function");
         assert_eq!(body["tool_choice"]["function"]["name"], "get_weather");
@@ -1391,7 +1417,7 @@ mod tests {
                 json_schema: Some(serde_json::json!({"type": "object", "properties": {"name": {"type": "string"}}})),
                 strict: true,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         // response_format (NOT text.format like Responses API)
         assert_eq!(body["response_format"]["type"], "json_schema");
         assert!(body["response_format"]["json_schema"]["schema"].is_object());
@@ -1408,7 +1434,7 @@ mod tests {
                 json_schema: None,
                 strict: false,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["response_format"]["type"], "json_object");
     }
 
@@ -1420,7 +1446,7 @@ mod tests {
             .provider_options(Some(serde_json::json!({
                 "openai-compatible": {"repetition_penalty": 1.2, "top_k": 50}
             })));
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["repetition_penalty"], 1.2);
         assert_eq!(body["top_k"], 50);
     }
@@ -1437,7 +1463,7 @@ mod tests {
                 detail: Some("low".into()),
             },
         }];
-        let result = translate_user_content(&parts);
+        let (result, _) = translate_user_content(&parts);
         let json_str = serde_json::to_string(&result).unwrap();
         assert!(
             json_str.contains("\"low\""),
@@ -1460,7 +1486,7 @@ mod tests {
                 },
             },
         ];
-        let result = translate_user_content(&parts);
+        let (result, _) = translate_user_content(&parts);
         let json_str = serde_json::to_string(&result).unwrap();
         assert!(
             json_str.contains("\"high\""),

@@ -245,6 +245,7 @@ mod tests {
 
         let request = Request {
             model: "m".into(),
+            messages: vec![Message::user("Hi")],
             ..Default::default()
         };
         let response = client.complete(request).await.unwrap();
@@ -262,6 +263,7 @@ mod tests {
 
         let request = Request {
             model: "m".into(),
+            messages: vec![Message::user("Hi")],
             ..Default::default()
         };
         let response = client.complete(request).await.unwrap();
@@ -293,6 +295,7 @@ mod tests {
 
         let request = Request {
             model: "m".into(),
+            messages: vec![Message::user("Hi")],
             ..Default::default()
         };
         client.complete(request).await.unwrap();
@@ -332,6 +335,7 @@ mod tests {
 
         let request = Request {
             model: "m".into(),
+            messages: vec![Message::user("Hi")],
             ..Default::default()
         };
         client.complete(request).await.unwrap();
@@ -361,6 +365,7 @@ mod tests {
 
         let request = Request {
             model: "m".into(),
+            messages: vec![Message::user("Hi")],
             ..Default::default()
         };
         let err = client.complete(request).await.unwrap_err();
@@ -396,6 +401,7 @@ mod tests {
 
         let request = Request {
             model: "m".into(),
+            messages: vec![Message::user("Hi")],
             ..Default::default()
         };
         let event_stream = client.stream(request).unwrap();
@@ -455,6 +461,7 @@ mod tests {
 
         let request = Request {
             model: "m".into(),
+            messages: vec![Message::user("Hi")],
             ..Default::default()
         };
         let event_stream = client.stream(request).unwrap();

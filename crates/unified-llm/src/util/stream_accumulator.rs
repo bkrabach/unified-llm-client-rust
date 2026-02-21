@@ -14,10 +14,13 @@ pub struct StreamAccumulator {
     model: String,
     provider: String,
     text_parts: Vec<String>,
-    reasoning_parts: Vec<String>,
-    tool_calls: Vec<ToolCallData>,
-    /// Signature captured from ReasoningEnd events for Thinking ContentPart.
+    /// Completed reasoning blocks: each entry is (text_parts, signature).
+    reasoning_blocks: Vec<(Vec<String>, Option<String>)>,
+    /// In-progress reasoning block's text parts (between ReasoningStart and ReasoningEnd).
+    current_reasoning_parts: Vec<String>,
+    /// In-progress reasoning block's signature (set by ReasoningEnd before finalization).
     current_reasoning_signature: Option<String>,
+    tool_calls: Vec<ToolCallData>,
     /// Buffer for the current in-progress tool call's arguments.
     current_tool_id: Option<String>,
     current_tool_name: Option<String>,
@@ -41,9 +44,10 @@ impl StreamAccumulator {
             model: String::new(),
             provider: String::new(),
             text_parts: Vec::new(),
-            reasoning_parts: Vec::new(),
-            tool_calls: Vec::new(),
+            reasoning_blocks: Vec::new(),
+            current_reasoning_parts: Vec::new(),
             current_reasoning_signature: None,
+            tool_calls: Vec::new(),
             current_tool_id: None,
             current_tool_name: None,
             current_tool_args: String::new(),
@@ -73,7 +77,7 @@ impl StreamAccumulator {
                 // for backward compatibility with older providers.
                 let text = event.reasoning_delta.as_ref().or(event.delta.as_ref());
                 if let Some(delta) = text {
-                    self.reasoning_parts.push(delta.clone());
+                    self.current_reasoning_parts.push(delta.clone());
                 }
             }
             StreamEventType::ToolCallStart => {
@@ -173,8 +177,30 @@ impl StreamAccumulator {
                         self.current_reasoning_signature = Some(sig.to_string());
                     }
                 }
+                // Finalize the current reasoning block
+                if !self.current_reasoning_parts.is_empty()
+                    || self.current_reasoning_signature.is_some()
+                {
+                    self.reasoning_blocks.push((
+                        std::mem::take(&mut self.current_reasoning_parts),
+                        self.current_reasoning_signature.take(),
+                    ));
+                }
             }
-            // TextStart, TextEnd, ReasoningStart, Error, ProviderEvent
+            StreamEventType::ReasoningStart => {
+                // If there's an in-progress block that was never finalized by
+                // ReasoningEnd (shouldn't happen in well-formed streams, but
+                // be defensive), push it before starting a new one.
+                if !self.current_reasoning_parts.is_empty() {
+                    self.reasoning_blocks.push((
+                        std::mem::take(&mut self.current_reasoning_parts),
+                        self.current_reasoning_signature.take(),
+                    ));
+                }
+                self.current_reasoning_parts.clear();
+                self.current_reasoning_signature = None;
+            }
+            // TextStart, TextEnd, Error, ProviderEvent
             // are acknowledged but don't require accumulation logic
             _ => {}
         }
@@ -187,9 +213,10 @@ impl StreamAccumulator {
     /// across multiple streaming steps.
     pub fn reset(&mut self) {
         self.text_parts.clear();
-        self.reasoning_parts.clear();
-        self.tool_calls.clear();
+        self.reasoning_blocks.clear();
+        self.current_reasoning_parts.clear();
         self.current_reasoning_signature = None;
+        self.tool_calls.clear();
         self.current_tool_id = None;
         self.current_tool_name = None;
         self.current_tool_args.clear();
@@ -211,7 +238,8 @@ impl StreamAccumulator {
     /// Returns None if no events have been processed yet (nothing accumulated).
     pub fn current_response(&self) -> Option<Response> {
         if self.text_parts.is_empty()
-            && self.reasoning_parts.is_empty()
+            && self.reasoning_blocks.is_empty()
+            && self.current_reasoning_parts.is_empty()
             && self.tool_calls.is_empty()
             && self.id.is_empty()
         {
@@ -225,11 +253,24 @@ impl StreamAccumulator {
         // Build content parts
         let mut content: Vec<ContentPart> = Vec::new();
 
-        // Add reasoning parts first (if any)
-        if !self.reasoning_parts.is_empty() {
+        // Emit one ContentPart::Thinking per completed reasoning block
+        for (parts, signature) in &self.reasoning_blocks {
             content.push(ContentPart::Thinking {
                 thinking: ThinkingData {
-                    text: self.reasoning_parts.join(""),
+                    text: parts.join(""),
+                    signature: signature.clone(),
+                    redacted: false,
+                    data: None,
+                },
+            });
+        }
+
+        // Finalize any in-progress reasoning block (stream ended without ReasoningEnd,
+        // or build_response() called mid-stream via current_response())
+        if !self.current_reasoning_parts.is_empty() {
+            content.push(ContentPart::Thinking {
+                thinking: ThinkingData {
+                    text: self.current_reasoning_parts.join(""),
                     signature: self.current_reasoning_signature.clone(),
                     redacted: false,
                     data: None,
@@ -796,6 +837,191 @@ mod tests {
             Some("sig_abc123".to_string()),
             "F-6: signature must be preserved through streaming accumulation"
         );
+    }
+
+    #[test]
+    fn test_multiple_thinking_blocks_preserved_separately() {
+        // BUG-2: When Anthropic sends multiple thinking blocks
+        // (ReasoningStart/Delta/End repeated), each block must be
+        // emitted as a separate ContentPart::Thinking with its own signature.
+        let mut acc = StreamAccumulator::new();
+
+        // --- Block 1 ---
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningStart,
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningDelta,
+            reasoning_delta: Some("First ".into()),
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningDelta,
+            reasoning_delta: Some("thought".into()),
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningEnd,
+            raw: Some(serde_json::json!({"signature": "sig_block1"})),
+            ..Default::default()
+        });
+
+        // --- Block 2 ---
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningStart,
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningDelta,
+            reasoning_delta: Some("Second thought".into()),
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningEnd,
+            raw: Some(serde_json::json!({"signature": "sig_block2"})),
+            ..Default::default()
+        });
+
+        // --- Text + Finish ---
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::TextDelta,
+            delta: Some("answer".into()),
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::Finish,
+            finish_reason: Some(FinishReason::stop()),
+            usage: Some(Usage::default()),
+            ..Default::default()
+        });
+
+        let resp = acc.response().unwrap();
+
+        // Collect all Thinking content parts
+        let thinking_parts: Vec<&ThinkingData> = resp
+            .message
+            .content
+            .iter()
+            .filter_map(|p| {
+                if let ContentPart::Thinking { thinking } = p {
+                    Some(thinking)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            thinking_parts.len(),
+            2,
+            "should emit 2 separate Thinking blocks, got {}",
+            thinking_parts.len()
+        );
+
+        // Block 1
+        assert_eq!(thinking_parts[0].text, "First thought");
+        assert_eq!(
+            thinking_parts[0].signature,
+            Some("sig_block1".to_string()),
+            "block 1 must retain its own signature"
+        );
+
+        // Block 2
+        assert_eq!(thinking_parts[1].text, "Second thought");
+        assert_eq!(
+            thinking_parts[1].signature,
+            Some("sig_block2".to_string()),
+            "block 2 must retain its own signature"
+        );
+
+        // Text is still correct
+        assert_eq!(resp.text(), "answer");
+    }
+
+    #[test]
+    fn test_three_thinking_blocks_with_mixed_signatures() {
+        // Edge case: block without a signature (no raw on ReasoningEnd)
+        let mut acc = StreamAccumulator::new();
+
+        // Block 1: has signature
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningStart,
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningDelta,
+            reasoning_delta: Some("A".into()),
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningEnd,
+            raw: Some(serde_json::json!({"signature": "sig_A"})),
+            ..Default::default()
+        });
+
+        // Block 2: NO signature
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningStart,
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningDelta,
+            reasoning_delta: Some("B".into()),
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningEnd,
+            ..Default::default()
+        });
+
+        // Block 3: has signature
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningStart,
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningDelta,
+            reasoning_delta: Some("C".into()),
+            ..Default::default()
+        });
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::ReasoningEnd,
+            raw: Some(serde_json::json!({"signature": "sig_C"})),
+            ..Default::default()
+        });
+
+        acc.process(&StreamEvent {
+            event_type: StreamEventType::Finish,
+            finish_reason: Some(FinishReason::stop()),
+            usage: Some(Usage::default()),
+            ..Default::default()
+        });
+
+        let resp = acc.response().unwrap();
+        let thinking_parts: Vec<&ThinkingData> = resp
+            .message
+            .content
+            .iter()
+            .filter_map(|p| {
+                if let ContentPart::Thinking { thinking } = p {
+                    Some(thinking)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(thinking_parts.len(), 3);
+        assert_eq!(thinking_parts[0].text, "A");
+        assert_eq!(thinking_parts[0].signature, Some("sig_A".to_string()));
+        assert_eq!(thinking_parts[1].text, "B");
+        assert_eq!(
+            thinking_parts[1].signature, None,
+            "block 2 has no signature"
+        );
+        assert_eq!(thinking_parts[2].text, "C");
+        assert_eq!(thinking_parts[2].signature, Some("sig_C".to_string()));
     }
 
     #[test]

@@ -19,6 +19,12 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Default max_tokens when not specified (Anthropic requires this field).
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
+/// Synthetic tool name used for tool-based structured output extraction.
+/// When `response_format.type == "json_schema"` and no user-defined tools are present,
+/// the adapter defines this synthetic tool whose `input_schema` IS the desired output schema,
+/// then forces `tool_choice` to it. The model's tool_use input is the structured output.
+const STRUCTURED_OUTPUT_TOOL_NAME: &str = "structured_output";
+
 /// Anthropic Messages API adapter.
 pub struct AnthropicAdapter {
     api_key: SecretString,
@@ -49,7 +55,7 @@ impl AnthropicAdapter {
         let timeout = AdapterTimeout::default();
         Self {
             api_key,
-            base_url: base_url.into(),
+            base_url: crate::util::normalize_base_url(&base_url.into()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
             http_client: Self::build_http_client(&timeout),
         }
@@ -73,7 +79,7 @@ impl AnthropicAdapter {
     ) -> Self {
         Self {
             api_key,
-            base_url: base_url.into(),
+            base_url: crate::util::normalize_base_url(&base_url.into()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
             http_client: Self::build_http_client(&timeout),
         }
@@ -154,11 +160,13 @@ impl AnthropicAdapterBuilder {
     /// Build the `AnthropicAdapter`.
     pub fn build(self) -> AnthropicAdapter {
         let timeout = self.timeout.unwrap_or_default();
+        let base_url = self
+            .base_url
+            .map(|u| crate::util::normalize_base_url(&u))
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         AnthropicAdapter {
             api_key: self.api_key,
-            base_url: self
-                .base_url
-                .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            base_url,
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
             http_client: AnthropicAdapter::build_http_client_with_headers(
                 &timeout,
@@ -201,7 +209,7 @@ impl AnthropicAdapter {
 
         let url = format!("{}/v1/messages", self.base_url);
         let beta_headers = collect_beta_headers(&request);
-        let body = translate_request_with_cache(&request);
+        let (body, translation_warnings) = translate_request_with_cache(&request);
 
         let request_headers = self.build_headers(&beta_headers)?;
 
@@ -229,7 +237,25 @@ impl AnthropicAdapter {
             .await
             .map_err(|e| Error::network(format!("Failed to parse response: {e}"), e))?;
 
-        parse_response(response_body, &headers)
+        let mut response = parse_response(response_body, &headers)?;
+        response.warnings = translation_warnings;
+
+        // GAP-2: Post-process tool-based structured output extraction.
+        // If we injected a synthetic tool for json_schema and the response contains
+        // our synthetic tool call, convert the tool arguments to text content so that
+        // response.text() returns the JSON for generate_object() to parse.
+        let used_tool_extraction = request
+            .response_format
+            .as_ref()
+            .map(|rf| rf.r#type == "json_schema" && rf.json_schema.is_some())
+            .unwrap_or(false)
+            && request.tools.is_none()
+            && request.tool_choice.is_none();
+        if used_tool_extraction {
+            postprocess_structured_output_tool(&mut response);
+        }
+
+        Ok(response)
     }
 
     /// Perform the HTTP request for stream() and return a stream of events.
@@ -243,7 +269,7 @@ impl AnthropicAdapter {
 
             let url = format!("{}/v1/messages", self.base_url);
             let beta_headers = collect_beta_headers(&request);
-            let mut body = translate_request_with_cache(&request);
+            let (mut body, _translation_warnings) = translate_request_with_cache(&request);
             // Add stream: true to the request body
             if let Some(obj) = body.as_object_mut() {
                 obj.insert("stream".into(), serde_json::Value::Bool(true));
@@ -770,8 +796,11 @@ impl ProviderAdapter for AnthropicAdapter {
 // === Request Translation ===
 
 /// Translate a unified Request into an Anthropic Messages API JSON body.
-pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
+pub(crate) fn translate_request(
+    request: &Request,
+) -> (serde_json::Value, Vec<unified_llm_types::Warning>) {
     let mut body = serde_json::Map::new();
+    let mut warnings: Vec<unified_llm_types::Warning> = Vec::new();
 
     // Model
     body.insert(
@@ -838,7 +867,8 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
                         continue;
                     }
                 };
-                let content_blocks = translate_content_parts(&msg.content);
+                let (content_blocks, mut part_warnings) = translate_content_parts(&msg.content);
+                warnings.append(&mut part_warnings);
                 api_messages.push(serde_json::json!({
                     "role": role_str,
                     "content": content_blocks,
@@ -854,9 +884,25 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
     // System parameter — build the system text, then inject structured output instructions if needed
     let mut system_text = system_parts.join("\n\n");
 
-    // Inject structured output instructions into system prompt (Anthropic has no native support)
+    // Determine if we can use tool-based extraction for structured output (GAP-2).
+    // Primary strategy: define a synthetic tool whose input_schema IS the desired output schema,
+    // force tool_choice to it, and extract the tool_use input as structured output.
+    // Fall back to system-prompt injection if tools or tool_choice are already set (to avoid conflicts).
+    let use_tool_based_extraction = request
+        .response_format
+        .as_ref()
+        .map(|rf| rf.r#type == "json_schema" && rf.json_schema.is_some())
+        .unwrap_or(false)
+        && request.tools.is_none()
+        && request.tool_choice.is_none();
+
+    // Structured output handling for Anthropic:
+    // - json_schema with tool-based extraction: handled below after tools section
+    // - json_schema without tool-based extraction (fallback): system prompt injection
+    // - json_object: always system prompt injection
     if let Some(ref response_format) = request.response_format {
-        if response_format.r#type == "json_schema" {
+        if response_format.r#type == "json_schema" && !use_tool_based_extraction {
+            // Fallback: inject schema into system prompt when tools/tool_choice conflict
             if let Some(ref schema) = response_format.json_schema {
                 let schema_instruction = format!(
                     "\n\nYou MUST respond with valid JSON that conforms to this JSON Schema:\n\
@@ -932,6 +978,28 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
         }
     }
 
+    // GAP-2: Tool-based structured output extraction (primary strategy for json_schema).
+    // Injects a synthetic tool with the user's schema as input_schema, then forces
+    // tool_choice to it. The response post-processing in do_complete() converts the
+    // tool_use input back into text content.
+    if use_tool_based_extraction {
+        if let Some(ref response_format) = request.response_format {
+            if let Some(ref schema) = response_format.json_schema {
+                let tool_def = serde_json::json!({
+                    "name": STRUCTURED_OUTPUT_TOOL_NAME,
+                    "description": "Generate structured output matching the specified JSON schema. \
+                        All output MUST be provided as the input to this tool.",
+                    "input_schema": schema,
+                });
+                body.insert("tools".into(), serde_json::json!([tool_def]));
+                body.insert(
+                    "tool_choice".into(),
+                    serde_json::json!({"type": "tool", "name": STRUCTURED_OUTPUT_TOOL_NAME}),
+                );
+            }
+        }
+    }
+
     // Map reasoning_effort to Anthropic's thinking config.
     // Only inject if provider_options.anthropic.thinking is NOT already set.
     if let Some(ref effort) = request.reasoning_effort {
@@ -942,7 +1010,7 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
             .and_then(|a| a.get("thinking"))
             .is_some();
 
-        if !has_explicit_thinking {
+        if !has_explicit_thinking && effort.as_str() != "none" {
             let budget = match effort.as_str() {
                 "low" => 1024,
                 "medium" => 4096,
@@ -966,10 +1034,10 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
     {
         let mut body_val = serde_json::Value::Object(body);
         crate::util::provider_options::merge_provider_options(&mut body_val, &opts, INTERNAL_KEYS);
-        return body_val;
+        return (body_val, warnings);
     }
 
-    serde_json::Value::Object(body)
+    (serde_json::Value::Object(body), warnings)
 }
 
 /// Translate a request with automatic cache_control injection.
@@ -979,16 +1047,18 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
 /// 1. Last block of system prompt
 /// 2. Last tool definition (if tools present)
 /// 3. Last message in conversation prefix (messages before final user message)
-pub(crate) fn translate_request_with_cache(request: &Request) -> serde_json::Value {
-    let mut body = translate_request(request);
+pub(crate) fn translate_request_with_cache(
+    request: &Request,
+) -> (serde_json::Value, Vec<unified_llm_types::Warning>) {
+    let (mut body, warnings) = translate_request(request);
 
     if !should_auto_cache(request.provider_options.as_ref()) {
-        return body;
+        return (body, warnings);
     }
 
     let body_obj = match body.as_object_mut() {
         Some(obj) => obj,
-        None => return body,
+        None => return (body, warnings),
     };
 
     // 1. Inject cache_control on system prompt (convert to array format if needed)
@@ -1069,12 +1139,16 @@ pub(crate) fn translate_request_with_cache(request: &Request) -> serde_json::Val
         }
     }
 
-    body
+    (body, warnings)
 }
 
 /// Translate unified ContentParts into Anthropic content blocks.
-fn translate_content_parts(parts: &[unified_llm_types::ContentPart]) -> Vec<serde_json::Value> {
-    parts
+/// Returns the translated blocks and any warnings for dropped/unsupported parts.
+fn translate_content_parts(
+    parts: &[unified_llm_types::ContentPart],
+) -> (Vec<serde_json::Value>, Vec<unified_llm_types::Warning>) {
+    let mut warnings = Vec::new();
+    let blocks = parts
         .iter()
         .filter_map(|part| match part {
             unified_llm_types::ContentPart::Text { text } => {
@@ -1187,14 +1261,20 @@ fn translate_content_parts(parts: &[unified_llm_types::ContentPart]) -> Vec<serd
                 })
             }
             other => {
-                tracing::warn!(
-                    "Dropping unsupported content part kind={:?} for provider=anthropic",
+                let msg = format!(
+                    "Dropped unsupported content part kind={:?} for provider=anthropic",
                     other.kind()
                 );
+                tracing::warn!("{}", msg);
+                warnings.push(unified_llm_types::Warning {
+                    message: msg,
+                    code: Some("dropped_content_part".to_string()),
+                });
                 None
             }
         })
-        .collect()
+        .collect();
+    (blocks, warnings)
 }
 
 /// Merge consecutive messages with the same role (Anthropic strict alternation).
@@ -1333,6 +1413,56 @@ pub(crate) fn parse_response(
         warnings: vec![],
         rate_limit: crate::util::http::parse_rate_limit_headers(headers),
     })
+}
+
+/// Post-process a response that used tool-based structured output extraction (GAP-2).
+///
+/// When the adapter injects a synthetic `structured_output` tool to extract JSON,
+/// the Anthropic response contains a `tool_use` block instead of text. This function
+/// converts the tool's arguments into a `ContentPart::Text` so that `response.text()`
+/// returns the JSON string, which `generate_object()` can then parse and validate.
+///
+/// Also changes `finish_reason` from `tool_calls` to `stop` since the tool call was
+/// synthetic and should not trigger the tool execution loop.
+fn postprocess_structured_output_tool(response: &mut Response) {
+    // Find the synthetic tool call and extract its arguments as JSON text
+    let json_text = response.message.content.iter().find_map(|part| {
+        if let unified_llm_types::ContentPart::ToolCall { tool_call } = part {
+            if tool_call.name == STRUCTURED_OUTPUT_TOOL_NAME {
+                let text = match &tool_call.arguments {
+                    unified_llm_types::ArgumentValue::Dict(map) => {
+                        serde_json::to_string(&serde_json::Value::Object(map.clone()))
+                            .unwrap_or_default()
+                    }
+                    unified_llm_types::ArgumentValue::Raw(s) => s.clone(),
+                };
+                return Some(text);
+            }
+        }
+        None
+    });
+
+    if let Some(text) = json_text {
+        // Remove the synthetic tool call from content parts
+        response.message.content.retain(|p| {
+            if let unified_llm_types::ContentPart::ToolCall { tool_call } = p {
+                tool_call.name != STRUCTURED_OUTPUT_TOOL_NAME
+            } else {
+                true
+            }
+        });
+
+        // Insert the JSON as text content
+        response
+            .message
+            .content
+            .insert(0, unified_llm_types::ContentPart::Text { text });
+
+        // Change finish reason from tool_calls to stop since the tool was synthetic
+        if response.finish_reason.reason == "tool_calls" {
+            response.finish_reason = unified_llm_types::FinishReason::stop();
+        }
+    }
 }
 
 /// Parse Anthropic content blocks into unified ContentParts.
@@ -1474,7 +1604,7 @@ mod tests {
     #[test]
     fn test_system_message_extraction() {
         let messages = vec![Message::system("You are helpful"), Message::user("Hello")];
-        let body = translate_request(
+        let (body, _) = translate_request(
             &Request::default()
                 .model("claude-opus-4-6")
                 .messages(messages),
@@ -1501,7 +1631,7 @@ mod tests {
             },
             Message::user("Hello"),
         ];
-        let body = translate_request(&Request::default().model("test").messages(messages));
+        let (body, _) = translate_request(&Request::default().model("test").messages(messages));
         let system = body["system"].as_str().unwrap();
         assert!(system.contains("System instructions"));
         assert!(system.contains("Developer context"));
@@ -1512,7 +1642,7 @@ mod tests {
     #[test]
     fn test_strict_alternation_merges_consecutive_same_role() {
         let messages = vec![Message::user("First"), Message::user("Second")];
-        let body = translate_request(&Request::default().model("test").messages(messages));
+        let (body, _) = translate_request(&Request::default().model("test").messages(messages));
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 1); // Merged into single user message
         let content = msgs[0]["content"].as_array().unwrap();
@@ -1521,7 +1651,7 @@ mod tests {
 
     #[test]
     fn test_max_tokens_default_4096() {
-        let body = translate_request(
+        let (body, _) = translate_request(
             &Request::default()
                 .model("test")
                 .messages(vec![Message::user("Hi")]),
@@ -1531,7 +1661,7 @@ mod tests {
 
     #[test]
     fn test_max_tokens_explicit() {
-        let body = translate_request(
+        let (body, _) = translate_request(
             &Request::default()
                 .model("test")
                 .messages(vec![Message::user("Hi")])
@@ -1548,7 +1678,7 @@ mod tests {
             Message::assistant("asst msg"),
             Message::tool_result("call_1", "result", false),
         ];
-        let body = translate_request(&Request::default().model("test").messages(messages));
+        let (body, _) = translate_request(&Request::default().model("test").messages(messages));
         assert!(body.get("system").is_some());
         let msgs = body["messages"].as_array().unwrap();
         // user, assistant, then tool_result as user => need to merge user+tool_result(user)
@@ -1567,7 +1697,7 @@ mod tests {
             .provider_options(Some(
                 serde_json::json!({"anthropic": {"thinking": {"type": "enabled"}}}),
             ));
-        let body = translate_request(&req);
+        let (body, _) = translate_request(&req);
         assert!(body.get("thinking").is_some());
         assert_eq!(body["thinking"]["type"], "enabled");
     }
@@ -1575,7 +1705,7 @@ mod tests {
     #[test]
     fn test_content_part_text_translation() {
         let messages = vec![Message::user("Hello world")];
-        let body = translate_request(&Request::default().model("test").messages(messages));
+        let (body, _) = translate_request(&Request::default().model("test").messages(messages));
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "Hello world");
@@ -1603,7 +1733,7 @@ mod tests {
             name: None,
             tool_call_id: None,
         };
-        let body = translate_request(&Request::default().model("test").messages(vec![msg]));
+        let (body, _) = translate_request(&Request::default().model("test").messages(vec![msg]));
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "image");
         // Must use base64 source, NOT url source
@@ -1630,7 +1760,7 @@ mod tests {
             name: None,
             tool_call_id: None,
         };
-        let body = translate_request(&Request::default().model("test").messages(vec![msg]));
+        let (body, _) = translate_request(&Request::default().model("test").messages(vec![msg]));
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "image");
         assert_eq!(content[0]["source"]["type"], "url");
@@ -1645,7 +1775,7 @@ mod tests {
             name: None,
             tool_call_id: None,
         };
-        let body = translate_request(&Request::default().model("test").messages(vec![msg]));
+        let (body, _) = translate_request(&Request::default().model("test").messages(vec![msg]));
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "image");
         assert_eq!(content[0]["source"]["type"], "base64");
@@ -1672,7 +1802,7 @@ mod tests {
             name: None,
             tool_call_id: None,
         };
-        let body = translate_request(&Request::default().model("test").messages(vec![msg]));
+        let (body, _) = translate_request(&Request::default().model("test").messages(vec![msg]));
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "tool_use");
         assert_eq!(content[0]["id"], "call_1");
@@ -2749,7 +2879,7 @@ mod tests {
                     "thinking": {"type": "enabled", "budget_tokens": 2048}
                 }
             })));
-        let body = translate_request(&req);
+        let (body, _) = translate_request(&req);
         assert!(body.get("thinking").is_some());
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 2048);
@@ -2876,7 +3006,7 @@ mod tests {
             Message::system("System prompt"),
             Message::user("Hello"),
         ]);
-        let body = translate_request_with_cache(&req);
+        let (body, _) = translate_request_with_cache(&req);
         // System should be an array of content blocks with cache_control on the last one
         let system = body.get("system").expect("should have system");
         let system_arr = system
@@ -2910,7 +3040,7 @@ mod tests {
                     strict: None,
                 },
             ]);
-        let body = translate_request_with_cache(&req);
+        let (body, _) = translate_request_with_cache(&req);
         let tools = body.get("tools").expect("should have tools");
         let tools_arr = tools.as_array().expect("tools should be array");
         // Last tool should have cache_control
@@ -2932,7 +3062,7 @@ mod tests {
             Message::assistant("First answer"),
             Message::user("Second question"), // This is the final user message
         ]);
-        let body = translate_request_with_cache(&req);
+        let (body, _) = translate_request_with_cache(&req);
         let messages = body.get("messages").unwrap().as_array().unwrap();
         // messages[0] = user "First question"
         // messages[1] = assistant "First answer" -- this should get cache_control
@@ -2965,7 +3095,7 @@ mod tests {
             .provider_options(Some(serde_json::json!({
                 "anthropic": {"auto_cache": false}
             })));
-        let body = translate_request_with_cache(&req);
+        let (body, _) = translate_request_with_cache(&req);
         // System should be a plain string, not array (no cache injection)
         let system = body.get("system").expect("should have system");
         assert!(
@@ -2980,7 +3110,7 @@ mod tests {
         let req = Request::default()
             .model("test")
             .messages(vec![Message::user("Hello")]);
-        let body = translate_request_with_cache(&req);
+        let (body, _) = translate_request_with_cache(&req);
         let messages = body.get("messages").unwrap().as_array().unwrap();
         assert_eq!(messages.len(), 1);
         // The only message is the final user message, no cache_control
@@ -3037,7 +3167,7 @@ mod tests {
                     strict: None,
                 },
             ]);
-        let body = translate_request_with_cache(&req);
+        let (body, _) = translate_request_with_cache(&req);
         let cache_ephemeral = serde_json::json!({"type": "ephemeral"});
 
         // 1. System prompt: last block should have cache_control
@@ -3221,7 +3351,7 @@ mod tests {
                     "custom_field": "value"
                 }
             })));
-        let body = translate_request(&req);
+        let (body, _) = translate_request(&req);
         assert!(
             body.get("beta_headers").is_none(),
             "beta_headers should be filtered from body"
@@ -3367,7 +3497,7 @@ mod tests {
                     "metadata": {"user_id": "u123"}
                 }
             })));
-        let body = translate_request(&req);
+        let (body, _) = translate_request(&req);
         // Internal keys must NOT appear in the body
         assert!(
             body.get("betas").is_none(),
@@ -3421,12 +3551,12 @@ mod tests {
         assert!(headers.contains_key("content-type"));
     }
 
-    // === AF-04: Anthropic Structured Output Fallback Tests ===
+    // === AF-04: Anthropic Structured Output Tests ===
 
     #[test]
-    fn test_anthropic_structured_output_injects_schema_in_system() {
-        // When response_format is json_schema, the schema should be injected
-        // into the system prompt since Anthropic has no native structured output.
+    fn test_anthropic_structured_output_uses_tool_extraction() {
+        // GAP-2: When response_format is json_schema and no tools are present,
+        // the primary strategy is tool-based extraction (synthetic tool + forced tool_choice).
         let req = Request::default()
             .model("claude-sonnet-4-20250514")
             .messages(vec![
@@ -3442,19 +3572,50 @@ mod tests {
                 })),
                 strict: true,
             });
-        let body = translate_request(&req);
+        let (body, _) = translate_request(&req);
+
+        // System message preserved, no schema injection in system prompt
         let system_text = body.get("system").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
             system_text.contains("You are helpful."),
             "Original system message should be preserved"
         );
+
+        // Tool-based extraction: synthetic tool should be present
+        let tools = body.get("tools").and_then(|v| v.as_array());
         assert!(
-            system_text.contains("JSON Schema"),
-            "Schema instruction should be injected into system prompt"
+            tools.is_some(),
+            "Tool-based extraction should add a synthetic tool"
         );
+        let tools = tools.unwrap();
+        assert_eq!(tools.len(), 1, "Exactly one synthetic tool");
+        assert_eq!(
+            tools[0].get("name").and_then(|v| v.as_str()),
+            Some("structured_output"),
+            "Synthetic tool should be named structured_output"
+        );
+        // The input_schema should be the user's schema
+        let input_schema = tools[0].get("input_schema");
         assert!(
-            system_text.contains("\"answer\""),
-            "The actual schema should appear in the system prompt"
+            input_schema.is_some(),
+            "Synthetic tool should have input_schema"
+        );
+        assert_eq!(
+            input_schema
+                .unwrap()
+                .get("properties")
+                .and_then(|p| p.get("answer")),
+            Some(&serde_json::json!({"type": "integer"})),
+            "Schema should contain the answer property"
+        );
+
+        // tool_choice should force this tool
+        let tool_choice = body.get("tool_choice");
+        assert!(tool_choice.is_some(), "tool_choice should be set");
+        assert_eq!(
+            tool_choice.unwrap().get("name").and_then(|v| v.as_str()),
+            Some("structured_output"),
+            "tool_choice should force the structured_output tool"
         );
     }
 
@@ -3468,7 +3629,7 @@ mod tests {
                 json_schema: None,
                 strict: false,
             });
-        let body = translate_request(&req);
+        let (body, _) = translate_request(&req);
         let system_text = body.get("system").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
             system_text.contains("valid JSON"),
@@ -3477,7 +3638,9 @@ mod tests {
     }
 
     #[test]
-    fn test_anthropic_structured_output_preserves_existing_system() {
+    fn test_anthropic_structured_output_fallback_with_existing_tools() {
+        // GAP-2: When tools are already present, tool-based extraction falls back
+        // to system-prompt injection to avoid conflicts.
         let req = Request::default()
             .model("claude-sonnet-4-20250514")
             .messages(vec![
@@ -3488,8 +3651,14 @@ mod tests {
                 r#type: "json_schema".to_string(),
                 json_schema: Some(serde_json::json!({"type": "object"})),
                 strict: true,
-            });
-        let body = translate_request(&req);
+            })
+            .tools(vec![unified_llm_types::ToolDefinition {
+                name: "calculator".to_string(),
+                description: "Adds numbers".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+            }]);
+        let (body, _) = translate_request(&req);
         let system_text = body.get("system").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
             system_text.starts_with("You are a math expert."),
@@ -3497,7 +3666,14 @@ mod tests {
         );
         assert!(
             system_text.contains("JSON Schema"),
-            "Schema injection should be appended"
+            "Schema injection should be appended (fallback mode)"
+        );
+        // Should have the user's tool, NOT the synthetic json_output tool
+        let tools = body.get("tools").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(tools.len(), 1, "Only the user's tool, no synthetic tool");
+        assert_eq!(
+            tools[0].get("name").and_then(|v| v.as_str()),
+            Some("calculator"),
         );
     }
 
@@ -3592,7 +3768,7 @@ mod tests {
                 data: None,
             },
         }];
-        let translated = translate_content_parts(&parts);
+        let (translated, _) = translate_content_parts(&parts);
         assert_eq!(translated.len(), 1, "Thinking block should not be dropped");
         let block = &translated[0];
         assert_eq!(block["type"], "thinking");
@@ -3610,7 +3786,7 @@ mod tests {
                 data: Some("opaque_blob_data".to_string()),
             },
         }];
-        let translated = translate_content_parts(&parts);
+        let (translated, _) = translate_content_parts(&parts);
         assert_eq!(
             translated.len(),
             1,
@@ -3635,7 +3811,7 @@ mod tests {
             },
             ContentPart::text("After"),
         ];
-        let translated = translate_content_parts(&parts);
+        let (translated, _) = translate_content_parts(&parts);
         assert_eq!(
             translated.len(),
             3,
@@ -3824,7 +4000,7 @@ mod tests {
             .model("claude-opus-4-6")
             .messages(vec![Message::user("think hard")])
             .reasoning_effort("high");
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert!(
             body.get("thinking").is_some(),
             "should have thinking config"
@@ -3839,7 +4015,7 @@ mod tests {
             .model("claude-opus-4-6")
             .messages(vec![Message::user("quick")])
             .reasoning_effort("low");
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["thinking"]["budget_tokens"], 1024);
     }
 
@@ -3849,7 +4025,7 @@ mod tests {
             .model("claude-opus-4-6")
             .messages(vec![Message::user("think")])
             .reasoning_effort("medium");
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["thinking"]["budget_tokens"], 4096);
     }
 
@@ -3867,7 +4043,7 @@ mod tests {
                     }
                 }
             })));
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         // Explicit provider_options.anthropic.thinking should be preserved
         assert_eq!(body["thinking"]["budget_tokens"], 2048);
     }
@@ -3946,7 +4122,7 @@ mod tests {
                 mode: "auto".into(),
                 tool_name: None,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["tool_choice"]["type"], "auto");
     }
 
@@ -3960,7 +4136,7 @@ mod tests {
                 mode: "none".into(),
                 tool_name: None,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         // Anthropic workaround: tools array is removed entirely when tool_choice is "none"
         assert!(
             body.get("tools").is_none(),
@@ -3982,7 +4158,7 @@ mod tests {
                 mode: "required".into(),
                 tool_name: None,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         // Anthropic maps "required" → "any"
         assert_eq!(body["tool_choice"]["type"], "any");
     }
@@ -3997,7 +4173,7 @@ mod tests {
                 mode: "named".into(),
                 tool_name: Some("get_weather".into()),
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["tool_choice"]["type"], "tool");
         assert_eq!(body["tool_choice"]["name"], "get_weather");
     }

@@ -228,7 +228,7 @@ async fn test_smoke_image_input() {
 ///
 /// Provider-specific quirks:
 /// - OpenAI: supports additionalProperties in schema
-/// - Anthropic: uses tool-based structured output (generate_object handles internally)
+/// - Anthropic: uses tool-based structured output extraction (synthetic tool with forced tool_choice)
 /// - Gemini: rejects additionalProperties in schemas
 #[tokio::test]
 #[ignore]

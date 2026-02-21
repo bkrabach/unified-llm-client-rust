@@ -9,7 +9,7 @@ use secrecy::{ExposeSecret, SecretString};
 use unified_llm_types::{
     AdapterTimeout, ArgumentValue, BoxFuture, BoxStream, ContentPart, Error, ErrorKind,
     FinishReason, Message, ProviderAdapter, Request, Response, Role, StreamEvent, StreamEventType,
-    ThinkingData, ToolCall, ToolCallData, Usage,
+    ThinkingData, ToolCall, ToolCallData, Usage, Warning,
 };
 
 use crate::util::sse::SseParser;
@@ -50,7 +50,7 @@ impl GeminiAdapter {
         let timeout = AdapterTimeout::default();
         Self {
             api_key,
-            base_url: base_url.into(),
+            base_url: crate::util::normalize_base_url(&base_url.into()),
             http_client: Self::build_http_client(&timeout),
             tool_call_map: Mutex::new(HashMap::new()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
@@ -76,7 +76,7 @@ impl GeminiAdapter {
     ) -> Self {
         Self {
             api_key,
-            base_url: base_url.into(),
+            base_url: crate::util::normalize_base_url(&base_url.into()),
             http_client: Self::build_http_client(&timeout),
             tool_call_map: Mutex::new(HashMap::new()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
@@ -180,7 +180,7 @@ impl GeminiAdapter {
             }
         }
         let url = self.build_url(&request.model);
-        let body = {
+        let (body, translation_warnings) = {
             let map = self.tool_call_map.lock().unwrap_or_else(|e| e.into_inner());
             translate_request(&request, Some(&map))
         };
@@ -210,7 +210,8 @@ impl GeminiAdapter {
             .await
             .map_err(|e| Error::network(format!("Failed to parse response: {e}"), e))?;
 
-        let response = parse_response(response_body, &headers)?;
+        let mut response = parse_response(response_body, &headers)?;
+        response.warnings = translation_warnings;
 
         // Store tool call ID → function name mappings for future functionResponse routing
         for part in &response.message.content {
@@ -248,7 +249,7 @@ impl GeminiAdapter {
             }
 
             let url = self.build_stream_url(&request.model);
-            let body = {
+            let (body, _translation_warnings) = {
                 let map = self.tool_call_map.lock().unwrap_or_else(|e| e.into_inner());
                 translate_request(&request, Some(&map))
             };
@@ -396,11 +397,13 @@ impl GeminiAdapterBuilder {
     /// Build the `GeminiAdapter`.
     pub fn build(self) -> GeminiAdapter {
         let timeout = self.timeout.unwrap_or_default();
+        let base_url = self
+            .base_url
+            .map(|u| crate::util::normalize_base_url(&u))
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         GeminiAdapter {
             api_key: self.api_key,
-            base_url: self
-                .base_url
-                .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            base_url,
             http_client: GeminiAdapter::build_http_client_with_headers(
                 &timeout,
                 self.default_headers,
@@ -431,8 +434,9 @@ impl ProviderAdapter for GeminiAdapter {
 pub(crate) fn translate_request(
     request: &Request,
     tool_call_map: Option<&std::collections::HashMap<String, String>>,
-) -> serde_json::Value {
+) -> (serde_json::Value, Vec<Warning>) {
     let mut body = serde_json::Map::new();
+    let mut warnings: Vec<Warning> = Vec::new();
 
     // All system messages are extracted regardless of conversation position per provider API
     // conventions. Mid-conversation system messages are repositioned to the system prompt area.
@@ -445,7 +449,8 @@ pub(crate) fn translate_request(
                 system_parts.push(msg.text());
             }
             Role::User => {
-                let parts = translate_content_parts(&msg.content);
+                let (parts, mut part_warnings) = translate_content_parts(&msg.content);
+                warnings.append(&mut part_warnings);
                 contents.push(serde_json::json!({
                     "role": "user",
                     "parts": parts,
@@ -489,7 +494,8 @@ pub(crate) fn translate_request(
                         "parts": parts,
                     }));
                 } else {
-                    let parts = translate_content_parts(&msg.content);
+                    let (parts, mut part_warnings) = translate_content_parts(&msg.content);
+                    warnings.append(&mut part_warnings);
                     contents.push(serde_json::json!({
                         "role": "model",
                         "parts": parts,
@@ -674,15 +680,17 @@ pub(crate) fn translate_request(
     {
         let mut body_val = serde_json::Value::Object(body);
         crate::util::provider_options::merge_provider_options(&mut body_val, &opts, INTERNAL_KEYS);
-        return body_val;
+        return (body_val, warnings);
     }
 
-    serde_json::Value::Object(body)
+    (serde_json::Value::Object(body), warnings)
 }
 
 /// Translate unified ContentParts into Gemini parts array.
-fn translate_content_parts(parts: &[ContentPart]) -> Vec<serde_json::Value> {
-    parts
+/// Returns the translated parts and any warnings for dropped/unsupported content.
+fn translate_content_parts(parts: &[ContentPart]) -> (Vec<serde_json::Value>, Vec<Warning>) {
+    let mut warnings = Vec::new();
+    let blocks = parts
         .iter()
         .filter_map(|part| match part {
             ContentPart::Text { text } => Some(serde_json::json!({"text": text})),
@@ -765,14 +773,20 @@ fn translate_content_parts(parts: &[ContentPart]) -> Vec<serde_json::Value> {
                 Some(part)
             }
             other => {
-                tracing::warn!(
-                    "Dropping unsupported content part kind={:?} for provider=gemini",
+                let msg = format!(
+                    "Dropped unsupported content part kind={:?} for provider=gemini",
                     other.kind()
                 );
+                tracing::warn!("{}", msg);
+                warnings.push(Warning {
+                    message: msg,
+                    code: Some("dropped_content_part".to_string()),
+                });
                 None
             }
         })
-        .collect()
+        .collect();
+    (blocks, warnings)
 }
 
 // === Response Translation ===
@@ -974,6 +988,10 @@ pub(crate) fn parse_error(
     err.error_code = error_code.clone();
 
     // F-5: Override ErrorKind based on gRPC status codes (spec §6.4)
+    // GAP-3: All 8 spec-required gRPC codes mapped.
+    //
+    // Important: gRPC code mapping runs first, then message-based reclassification
+    // can further refine (e.g. INVALID_ARGUMENT + "API key not valid" → Authentication).
     if let Some(ref code) = error_code {
         match code.as_str() {
             "DEADLINE_EXCEEDED" => err.kind = ErrorKind::RequestTimeout,
@@ -981,9 +999,26 @@ pub(crate) fn parse_error(
             "RESOURCE_EXHAUSTED" => err.kind = ErrorKind::RateLimit,
             "UNAUTHENTICATED" => err.kind = ErrorKind::Authentication,
             "NOT_FOUND" => err.kind = ErrorKind::NotFound,
+            "INVALID_ARGUMENT" => err.kind = ErrorKind::InvalidRequest,
+            "UNAVAILABLE" => err.kind = ErrorKind::Server,
+            "INTERNAL" => err.kind = ErrorKind::Server,
             _ => {}
         }
     }
+
+    // GAP-3: Apply message-based reclassification AFTER gRPC override.
+    // This catches cases like HTTP 400 + INVALID_ARGUMENT + "API key not valid" → Authentication.
+    err.kind = Error::classify_by_message_pub(&err.message, err.kind);
+
+    // GAP-3: Recalculate retryable based on the final kind.
+    err.retryable = matches!(
+        err.kind,
+        ErrorKind::RateLimit
+            | ErrorKind::Server
+            | ErrorKind::RequestTimeout
+            | ErrorKind::Network
+            | ErrorKind::Stream
+    );
 
     err
 }
@@ -997,6 +1032,8 @@ struct GeminiStreamTranslator {
     /// S-1: text_id generated on TextStart, propagated to TextDelta/TextEnd.
     current_text_id: Option<String>,
     reasoning_started: bool,
+    /// Accumulated thoughtSignature from streaming thought parts for round-trip.
+    active_thinking_signature: Option<String>,
     finished: bool,
     response_id: String,
     model: String,
@@ -1009,6 +1046,7 @@ impl GeminiStreamTranslator {
             text_started: false,
             current_text_id: None,
             reasoning_started: false,
+            active_thinking_signature: None,
             finished: false,
             response_id: String::new(),
             model: String::new(),
@@ -1064,10 +1102,15 @@ impl GeminiStreamTranslator {
                 if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
                     if !self.reasoning_started {
                         self.reasoning_started = true;
+                        self.active_thinking_signature = None; // reset for new thinking block
                         events.push(StreamEvent {
                             event_type: StreamEventType::ReasoningStart,
                             ..Default::default()
                         });
+                    }
+                    // Capture thoughtSignature for round-trip (last one wins)
+                    if let Some(sig) = part.get("thoughtSignature").and_then(|v| v.as_str()) {
+                        self.active_thinking_signature = Some(sig.to_string());
                     }
                     let text = part
                         .get("text")
@@ -1129,6 +1172,10 @@ impl GeminiStreamTranslator {
                     if self.reasoning_started {
                         events.push(StreamEvent {
                             event_type: StreamEventType::ReasoningEnd,
+                            raw: self
+                                .active_thinking_signature
+                                .take()
+                                .map(|sig| serde_json::json!({"signature": sig})),
                             ..Default::default()
                         });
                         self.reasoning_started = false;
@@ -1164,6 +1211,10 @@ impl GeminiStreamTranslator {
             if self.reasoning_started {
                 events.push(StreamEvent {
                     event_type: StreamEventType::ReasoningEnd,
+                    raw: self
+                        .active_thinking_signature
+                        .take()
+                        .map(|sig| serde_json::json!({"signature": sig})),
                     ..Default::default()
                 });
                 self.reasoning_started = false;
@@ -1240,6 +1291,10 @@ impl GeminiStreamTranslator {
             if self.reasoning_started {
                 events.push(StreamEvent {
                     event_type: StreamEventType::ReasoningEnd,
+                    raw: self
+                        .active_thinking_signature
+                        .take()
+                        .map(|sig| serde_json::json!({"signature": sig})),
                     ..Default::default()
                 });
             }
@@ -1362,7 +1417,7 @@ mod tests {
             Message::system("You are helpful."),
             Message::user("Hello"),
         ]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let sys = &body["systemInstruction"];
         assert_eq!(sys["parts"][0]["text"], "You are helpful.");
@@ -1387,7 +1442,7 @@ mod tests {
             },
             Message::user("Hi"),
         ]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let sys_text = body["systemInstruction"]["parts"][0]["text"]
             .as_str()
@@ -1403,7 +1458,7 @@ mod tests {
             Message::assistant("Hi there!"),
             Message::user("How are you?"),
         ]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 3);
@@ -1418,7 +1473,7 @@ mod tests {
         let request = Request::default()
             .model("gemini-2.0-flash")
             .messages(vec![Message::user("Hi")]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
         // Model goes in URL, not body
         assert!(body.get("model").is_none());
     }
@@ -1436,7 +1491,7 @@ mod tests {
                 parameters: serde_json::json!({"type": "object", "properties": {"city": {"type": "string"}}}),
                 strict: None,
             }]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
@@ -1455,7 +1510,7 @@ mod tests {
                 mode: "auto".to_string(),
                 tool_name: None,
             });
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
     }
@@ -1469,7 +1524,7 @@ mod tests {
                 mode: "none".to_string(),
                 tool_name: None,
             });
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
         assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "NONE");
     }
 
@@ -1482,7 +1537,7 @@ mod tests {
                 mode: "required".to_string(),
                 tool_name: None,
             });
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
         assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
     }
 
@@ -1495,7 +1550,7 @@ mod tests {
                 mode: "named".to_string(),
                 tool_name: Some("get_weather".to_string()),
             });
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
         assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
         let allowed = body["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"]
             .as_array()
@@ -1527,7 +1582,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
             }]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let parts = body["contents"][0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
@@ -1553,7 +1608,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
             }]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let parts = body["contents"][0]["parts"].as_array().unwrap();
         assert_eq!(
@@ -1585,7 +1640,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
             }]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(contents[0]["role"], "model");
@@ -1599,7 +1654,7 @@ mod tests {
         let request = Request::default()
             .model("gemini-2.0-flash")
             .messages(vec![Message::tool_result("get_weather", "72°F", false)]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(contents[0]["role"], "user");
@@ -1628,7 +1683,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
             }]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let fr = &body["contents"][0]["parts"][0]["functionResponse"];
         assert_eq!(fr["response"]["temp"], 72);
@@ -1655,7 +1710,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
             }]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let fr = &body["contents"][0]["parts"][0]["functionResponse"];
         assert_eq!(fr["name"], "get_weather");
@@ -1679,7 +1734,7 @@ mod tests {
             .temperature(0.7)
             .top_p(0.9)
             .stop_sequences(vec!["STOP".to_string()]);
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let gc = &body["generationConfig"];
         assert_eq!(gc["maxOutputTokens"], 1000);
@@ -1698,7 +1753,7 @@ mod tests {
                 json_schema: Some(serde_json::json!({"type": "object", "properties": {"name": {"type": "string"}}})),
                 strict: true,
             });
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         let gc = &body["generationConfig"];
         assert_eq!(gc["responseMimeType"], "application/json");
@@ -1718,7 +1773,7 @@ mod tests {
                     }
                 }
             })));
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         // thinkingConfig must be at the request root, NOT inside generationConfig
         assert_eq!(body["thinkingConfig"]["thinkingLevel"], "HIGH");
@@ -1743,7 +1798,7 @@ mod tests {
                     "thinkingConfig": {"thinkingLevel": "HIGH"},
                 }
             })));
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
 
         // safetySettings should be passed through
         assert!(body.get("safetySettings").is_some());
@@ -2771,7 +2826,7 @@ mod tests {
                 tool_call_id: None,
             }]);
 
-        let body = translate_request(&request, Some(&map));
+        let (body, _) = translate_request(&request, Some(&map));
         let parts = body["contents"][0]["parts"].as_array().unwrap();
         let fr = &parts[0]["functionResponse"];
         // Must resolve to the function name, NOT the synthetic ID
@@ -2801,7 +2856,7 @@ mod tests {
                 tool_call_id: None,
             }]);
 
-        let body = translate_request(&request, Some(&map));
+        let (body, _) = translate_request(&request, Some(&map));
         let parts = body["contents"][0]["parts"].as_array().unwrap();
         // Falls back to tool_call_id verbatim
         assert_eq!(parts[0]["functionResponse"]["name"], "get_weather");
@@ -2819,7 +2874,7 @@ mod tests {
                 data: None,
             },
         }];
-        let translated = translate_content_parts(&parts);
+        let (translated, _) = translate_content_parts(&parts);
         assert_eq!(translated.len(), 1, "Thinking block should not be dropped");
         let part = &translated[0];
         assert_eq!(part["thought"], true);
@@ -2836,7 +2891,7 @@ mod tests {
                 data: None,
             },
         }];
-        let translated = translate_content_parts(&parts);
+        let (translated, _) = translate_content_parts(&parts);
         assert_eq!(translated.len(), 1, "Thinking block should not be dropped");
         let part = &translated[0];
         assert_eq!(part["thought"], true);
@@ -2904,7 +2959,7 @@ mod tests {
             }
         }
 
-        let body = translate_request(&request, Some(&map));
+        let (body, _) = translate_request(&request, Some(&map));
         let contents = body["contents"].as_array().unwrap();
 
         // Find the functionResponse part
@@ -3068,7 +3123,7 @@ mod tests {
             .model("gemini-2.5-flash")
             .messages(vec![Message::user("think hard")])
             .reasoning_effort("high");
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
         assert_eq!(body["thinkingConfig"]["thinkingLevel"], "HIGH");
     }
 
@@ -3078,7 +3133,7 @@ mod tests {
             .model("gemini-2.5-flash")
             .messages(vec![Message::user("quick answer")])
             .reasoning_effort("low");
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
         assert_eq!(body["thinkingConfig"]["thinkingLevel"], "LOW");
     }
 
@@ -3088,7 +3143,7 @@ mod tests {
             .model("gemini-2.5-flash")
             .messages(vec![Message::user("think")])
             .reasoning_effort("medium");
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
         assert_eq!(body["thinkingConfig"]["thinkingLevel"], "MEDIUM");
     }
 
@@ -3098,7 +3153,7 @@ mod tests {
             .model("gemini-2.5-flash")
             .messages(vec![Message::user("no thinking")])
             .reasoning_effort("none");
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
         assert_eq!(
             body["thinkingConfig"]["thinkingLevel"], "THINKING_BUDGET_NONE",
             "reasoning_effort 'none' must map to THINKING_BUDGET_NONE, not NONE"
@@ -3118,7 +3173,7 @@ mod tests {
                     }
                 }
             })));
-        let body = translate_request(&request, None);
+        let (body, _) = translate_request(&request, None);
         // Explicit provider_options.gemini.thinkingConfig should take precedence
         // thinkingConfig is at request root level
         assert_eq!(body["thinkingConfig"]["thinkingLevel"], "LOW");

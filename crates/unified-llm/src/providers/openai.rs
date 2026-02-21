@@ -6,7 +6,7 @@ use secrecy::{ExposeSecret, SecretString};
 use unified_llm_types::{
     AdapterTimeout, ArgumentValue, BoxFuture, BoxStream, ContentPart, Error, FinishReason, Message,
     ProviderAdapter, Request, Response, Role, StreamError, StreamEvent, StreamEventType, ToolCall,
-    ToolCallData, Usage,
+    ToolCallData, Usage, Warning,
 };
 
 use crate::util::sse::SseParser;
@@ -44,7 +44,7 @@ impl OpenAiAdapter {
         let timeout = AdapterTimeout::default();
         Self {
             api_key,
-            base_url: base_url.into(),
+            base_url: crate::util::normalize_base_url(&base_url.into()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
             http_client: Self::build_http_client(&timeout),
         }
@@ -68,7 +68,7 @@ impl OpenAiAdapter {
     ) -> Self {
         Self {
             api_key,
-            base_url: base_url.into(),
+            base_url: crate::util::normalize_base_url(&base_url.into()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
             http_client: Self::build_http_client(&timeout),
         }
@@ -139,7 +139,7 @@ impl OpenAiAdapter {
         crate::util::image::pre_resolve_local_images(&mut request.messages).await?;
 
         let url = format!("{}/v1/responses", self.base_url);
-        let body = translate_request(&request);
+        let (body, translation_warnings) = translate_request(&request);
 
         let request_headers = self.build_headers()?;
 
@@ -167,7 +167,9 @@ impl OpenAiAdapter {
             .await
             .map_err(|e| Error::network(format!("Failed to parse response: {e}"), e))?;
 
-        parse_response(response_body, &headers)
+        let mut response = parse_response(response_body, &headers)?;
+        response.warnings = translation_warnings;
+        Ok(response)
     }
 
     /// Perform the HTTP request for stream() and return a stream of events.
@@ -180,7 +182,7 @@ impl OpenAiAdapter {
             }
 
             let url = format!("{}/v1/responses", self.base_url);
-            let mut body = translate_request(&request);
+            let (mut body, _translation_warnings) = translate_request(&request);
             // Add stream: true to the request body
             if let Some(obj) = body.as_object_mut() {
                 obj.insert("stream".into(), serde_json::Value::Bool(true));
@@ -321,11 +323,13 @@ impl OpenAiAdapterBuilder {
     /// Build the `OpenAiAdapter`.
     pub fn build(self) -> OpenAiAdapter {
         let timeout = self.timeout.unwrap_or_default();
+        let base_url = self
+            .base_url
+            .map(|u| crate::util::normalize_base_url(&u))
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         OpenAiAdapter {
             api_key: self.api_key,
-            base_url: self
-                .base_url
-                .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            base_url,
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
             http_client: OpenAiAdapter::build_http_client_with_headers(
                 &timeout,
@@ -352,8 +356,10 @@ impl ProviderAdapter for OpenAiAdapter {
 // === Request Translation ===
 
 /// Translate a unified Request into an OpenAI Responses API JSON body.
-pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
+/// Returns the translated body and any warnings for dropped/unsupported content.
+pub(crate) fn translate_request(request: &Request) -> (serde_json::Value, Vec<Warning>) {
     let mut body = serde_json::Map::new();
+    let mut warnings: Vec<Warning> = Vec::new();
 
     // Model
     body.insert(
@@ -372,7 +378,8 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
                 instructions_parts.push(msg.text());
             }
             Role::User => {
-                let content_parts = translate_user_content(&msg.content);
+                let (content_parts, mut part_warnings) = translate_user_content(&msg.content);
+                warnings.append(&mut part_warnings);
                 input_items.push(serde_json::json!({
                     "type": "message",
                     "role": "user",
@@ -402,8 +409,22 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
                     }));
                 }
 
-                // Emit function_call items for any tool calls
+                // Emit function_call items for any tool calls; warn on unsupported parts
                 for part in &msg.content {
+                    if matches!(
+                        part,
+                        ContentPart::Thinking { .. } | ContentPart::RedactedThinking { .. }
+                    ) {
+                        let msg = format!(
+                            "Dropped unsupported content part kind={:?} for provider=openai",
+                            part.kind()
+                        );
+                        tracing::warn!("{}", msg);
+                        warnings.push(Warning {
+                            message: msg,
+                            code: Some("dropped_content_part".to_string()),
+                        });
+                    }
                     if let ContentPart::ToolCall { tool_call } = part {
                         let arguments_str = match &tool_call.arguments {
                             ArgumentValue::Dict(map) => {
@@ -541,15 +562,17 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
     {
         let mut body_val = serde_json::Value::Object(body);
         crate::util::provider_options::merge_provider_options(&mut body_val, &opts, INTERNAL_KEYS);
-        return body_val;
+        return (body_val, warnings);
     }
 
-    serde_json::Value::Object(body)
+    (serde_json::Value::Object(body), warnings)
 }
 
 /// Translate user content parts to OpenAI input_text format.
-fn translate_user_content(parts: &[ContentPart]) -> Vec<serde_json::Value> {
-    parts
+/// Returns the translated parts and any warnings for dropped/unsupported content.
+fn translate_user_content(parts: &[ContentPart]) -> (Vec<serde_json::Value>, Vec<Warning>) {
+    let mut warnings = Vec::new();
+    let blocks = parts
         .iter()
         .filter_map(|part| match part {
             ContentPart::Text { text } => {
@@ -607,9 +630,21 @@ fn translate_user_content(parts: &[ContentPart]) -> Vec<serde_json::Value> {
                     })
                 }
             }
-            _ => None,
+            other => {
+                let msg = format!(
+                    "Dropped unsupported content part kind={:?} for provider=openai",
+                    other.kind()
+                );
+                tracing::warn!("{}", msg);
+                warnings.push(Warning {
+                    message: msg,
+                    code: Some("dropped_content_part".to_string()),
+                });
+                None
+            }
         })
-        .collect()
+        .collect();
+    (blocks, warnings)
 }
 
 // === Response Translation ===
@@ -1309,7 +1344,7 @@ mod tests {
             Message::system("You are helpful."),
             Message::user("Hi"),
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["instructions"], "You are helpful.");
         // System message NOT in input array
         let input = body["input"].as_array().unwrap();
@@ -1329,7 +1364,7 @@ mod tests {
             },
             Message::user("Hi"),
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert!(body["instructions"]
             .as_str()
             .unwrap()
@@ -1342,7 +1377,7 @@ mod tests {
         let request = Request::default()
             .model("gpt-4o")
             .messages(vec![Message::user("Hello world")]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let input = &body["input"][0];
         assert_eq!(input["type"], "message");
         assert_eq!(input["role"], "user");
@@ -1358,7 +1393,7 @@ mod tests {
             Message::assistant("Hello!"),
             Message::user("How are you?"),
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let input = body["input"].as_array().unwrap();
         assert_eq!(input[1]["type"], "message");
         assert_eq!(input[1]["role"], "assistant");
@@ -1373,7 +1408,7 @@ mod tests {
             Message::system("Rule 2."),
             Message::user("Hi"),
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let instructions = body["instructions"].as_str().unwrap();
         assert!(instructions.contains("Rule 1."));
         assert!(instructions.contains("Rule 2."));
@@ -1392,7 +1427,7 @@ mod tests {
                 parameters: serde_json::json!({"type": "object", "properties": {"city": {"type": "string"}}}),
                 strict: None,
             }]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["type"], "function");
@@ -1412,7 +1447,7 @@ mod tests {
                 mode: "auto".into(),
                 tool_name: None,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["tool_choice"], "auto");
     }
 
@@ -1425,7 +1460,7 @@ mod tests {
                 mode: "none".into(),
                 tool_name: None,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["tool_choice"], "none");
     }
 
@@ -1439,7 +1474,7 @@ mod tests {
                 mode: "required".into(),
                 tool_name: None,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["tool_choice"], "required");
     }
 
@@ -1453,7 +1488,7 @@ mod tests {
                 mode: "named".into(),
                 tool_name: Some("get_weather".into()),
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["tool_choice"]["type"], "function");
         // Responses API flat format: name is a sibling of type, NOT nested under "function"
         assert_eq!(body["tool_choice"]["name"], "get_weather");
@@ -1466,7 +1501,7 @@ mod tests {
             .model("gpt-4o")
             .messages(vec![Message::user("hi")])
             .max_tokens(500);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["max_output_tokens"], 500);
         assert!(body.get("max_tokens").is_none());
     }
@@ -1478,7 +1513,7 @@ mod tests {
             .model("o3")
             .messages(vec![Message::user("think hard")])
             .reasoning_effort("high");
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["reasoning"]["effort"], "high");
     }
 
@@ -1495,7 +1530,7 @@ mod tests {
                 ),
                 strict: true,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["text"]["format"]["type"], "json_schema");
         assert!(body["text"]["format"]["schema"].is_object());
         assert!(body.get("response_format").is_none());
@@ -1512,7 +1547,7 @@ mod tests {
                 json_schema: None,
                 strict: false,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["text"]["format"]["type"], "json_object");
         assert!(body.get("response_format").is_none());
     }
@@ -1529,7 +1564,7 @@ mod tests {
                 json_schema: Some(serde_json::json!({"type": "object"})),
                 strict: false,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let strict = body["text"]["format"]["strict"].as_bool();
         assert_eq!(
             strict,
@@ -1548,7 +1583,7 @@ mod tests {
                 json_schema: Some(serde_json::json!({"type": "object"})),
                 strict: true,
             });
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let strict = body["text"]["format"]["strict"].as_bool();
         assert_eq!(strict, Some(true), "strict: true should be forwarded");
     }
@@ -1565,7 +1600,7 @@ mod tests {
                 detail: Some("high".into()),
             },
         }];
-        let result = translate_user_content(&parts);
+        let (result, _) = translate_user_content(&parts);
         assert_eq!(result.len(), 1);
         let json_str = serde_json::to_string(&result[0]).unwrap();
         assert!(
@@ -1584,7 +1619,7 @@ mod tests {
                 detail: None,
             },
         }];
-        let result = translate_user_content(&parts);
+        let (result, _) = translate_user_content(&parts);
         assert_eq!(result.len(), 1);
         let json_str = serde_json::to_string(&result[0]).unwrap();
         assert!(
@@ -1602,7 +1637,7 @@ mod tests {
             .provider_options(Some(serde_json::json!({
                 "openai": {"store": true, "metadata": {"session": "abc"}}
             })));
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["store"], true);
         assert_eq!(body["metadata"]["session"], "abc");
     }
@@ -1632,7 +1667,7 @@ mod tests {
             },
             Message::tool_result("call_123", "72F sunny", false),
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let input = body["input"].as_array().unwrap();
 
         // User message
@@ -1692,7 +1727,7 @@ mod tests {
             Message::tool_result("call_1", "72F", false),
             Message::tool_result("call_2", "65F", false),
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let input = body["input"].as_array().unwrap();
         // 1 user + 2 function_calls + 2 function_call_outputs = 5
         assert_eq!(input.len(), 5);
@@ -1731,7 +1766,7 @@ mod tests {
                 tool_call_id: None,
             },
         ]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let input = body["input"].as_array().unwrap();
 
         // input[0] = user message
@@ -1973,7 +2008,7 @@ mod tests {
             .provider_options(Some(serde_json::json!({
                 "openai": {"store": true}
             })));
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["store"], true);
     }
 
@@ -2226,7 +2261,7 @@ mod tests {
             name: None,
             tool_call_id: None,
         }]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let content = body["input"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "input_text");
         assert_eq!(content[1]["type"], "input_image");
@@ -2256,7 +2291,7 @@ mod tests {
             name: None,
             tool_call_id: None,
         }]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let content = body["input"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "input_image");
         let image_url = content[0]["image_url"].as_str().unwrap();
@@ -2296,7 +2331,7 @@ mod tests {
             name: None,
             tool_call_id: None,
         }]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         let content = body["input"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "input_image");
         assert_eq!(content[0]["image_url"], "https://example.com/cat.png");
@@ -2363,7 +2398,7 @@ mod tests {
             .model("gpt-4o")
             .messages(vec![Message::user("hi")])
             .temperature(0.7);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["temperature"], 0.7);
     }
 
@@ -2395,7 +2430,7 @@ mod tests {
         let request = Request::default()
             .model("gpt-4o-mini")
             .messages(vec![Message::user("hi")]);
-        let body = translate_request(&request);
+        let (body, _) = translate_request(&request);
         assert_eq!(body["model"], "gpt-4o-mini");
     }
 
