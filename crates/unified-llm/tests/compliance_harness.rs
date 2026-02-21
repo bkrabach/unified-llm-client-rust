@@ -1237,15 +1237,25 @@ async fn compliance_8_6_9_multi_turn_caching_anthropic() {
         if turn >= 5 {
             let cache_read = result.usage.cache_read_tokens.unwrap_or(0);
             let input = result.usage.input_tokens;
-            // Log cache metrics for observability — no threshold assertion
+            let ratio = if input > 0 {
+                cache_read as f64 / input as f64 * 100.0
+            } else {
+                0.0
+            };
             eprintln!(
-                "[CACHE] Turn {turn}: cache_read={cache_read}, input={input}, ratio={:.1}%",
-                if input > 0 {
-                    cache_read as f64 / input as f64 * 100.0
-                } else {
-                    0.0
-                }
+                "[CACHE] Turn {turn}: cache_read={cache_read}, input={input}, ratio={ratio:.1}%"
             );
+
+            // §8.6.9 hard assertion: turn 5+ must show *some* cache activity
+            assert!(
+                cache_read > 0,
+                "Turn {turn}: expected some cache_read_tokens, got 0"
+            );
+            // Soft assertion: log warning if below 50% but don't fail —
+            // provider cache-hit rates depend on server-side behavior & timing.
+            if cache_read < input / 2 {
+                eprintln!("WARN: Turn {turn} cache ratio {ratio:.1}% is below 50% target");
+            }
         }
     }
     dod_pass("8.6.9/anthropic");
@@ -1563,4 +1573,106 @@ async fn compliance_8_9_10_reasoning_tokens_openai() {
         );
     }
     dod_pass("8.9.10/openai");
+}
+
+// ---------------------------------------------------------------------------
+// §8.9.10 — Reasoning tokens × Anthropic (claude-sonnet-4-20250514 with thinking)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_10_reasoning_tokens_anthropic() {
+    let client = require_client();
+    let result = with_compliance_retry(3, 2, || {
+        let opts = GenerateOptions::new("claude-sonnet-4-20250514")
+            .prompt(
+                "Solve step by step: If a train leaves Chicago at 60 mph and another \
+                 leaves New York at 80 mph toward each other, and the distance is 800 \
+                 miles, after how many hours do they meet?",
+            )
+            .max_tokens(8192)
+            .provider("anthropic")
+            .provider_options(serde_json::json!({
+                "anthropic": {
+                    "thinking": {
+                        "type": "enabled",
+                        "budget_tokens": 4096
+                    }
+                }
+            }));
+        let client = &client;
+        async move { unified_llm::generate(opts, client).await }
+    })
+    .await
+    .expect("Reasoning tokens anthropic test failed");
+
+    // Anthropic returns thinking blocks — the generate layer extracts them
+    // into result.reasoning. Also, reasoning_tokens is estimated from
+    // thinking block text length.
+    let has_reasoning_text = result.reasoning.as_ref().is_some_and(|r| !r.is_empty());
+    let reasoning_tokens = result.usage.reasoning_tokens;
+
+    assert!(
+        has_reasoning_text || reasoning_tokens.is_some(),
+        "anthropic: should have reasoning text or reasoning_tokens \
+         (reasoning={:?}, reasoning_tokens={:?})",
+        result.reasoning.as_deref().map(|r| &r[..r.len().min(80)]),
+        reasoning_tokens
+    );
+
+    if has_reasoning_text {
+        eprintln!(
+            "OK   compliance_8_9_10: anthropic reasoning text length = {}",
+            result.reasoning.as_ref().map(|r| r.len()).unwrap_or(0)
+        );
+    }
+    if let Some(rt) = reasoning_tokens {
+        eprintln!("OK   compliance_8_9_10: anthropic reasoning_tokens = {rt}");
+    }
+    dod_pass("8.9.10/anthropic");
+}
+
+// ---------------------------------------------------------------------------
+// §8.9.10 — Reasoning tokens × Gemini (gemini-2.5-flash with thinking)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_10_reasoning_tokens_gemini() {
+    let client = require_client();
+    let result = with_compliance_retry(3, 2, || {
+        let opts = GenerateOptions::new("gemini-2.5-flash-preview-04-17")
+            .prompt(
+                "Solve step by step: If a train leaves Chicago at 60 mph and another \
+                 leaves New York at 80 mph toward each other, and the distance is 800 \
+                 miles, after how many hours do they meet?",
+            )
+            .max_tokens(1024)
+            .provider("gemini")
+            .reasoning_effort("low");
+        let client = &client;
+        async move { unified_llm::generate(opts, client).await }
+    })
+    .await
+    .expect("Reasoning tokens gemini test failed");
+
+    let reasoning_tokens = result.usage.reasoning_tokens;
+    // Spec §8.9.10 requires reasoning_tokens are *reported* (Some), not that
+    // every prompt necessarily produces non-zero reasoning tokens.
+    assert!(
+        reasoning_tokens.is_some(),
+        "gemini: should report reasoning_tokens field (got None)"
+    );
+    if reasoning_tokens == Some(0) {
+        eprintln!(
+            "WARN compliance_8_9_10: gemini reasoning_tokens reported as 0 — \
+             model may not have used internal reasoning for this prompt"
+        );
+    } else {
+        eprintln!(
+            "OK   compliance_8_9_10: gemini reasoning_tokens = {:?}",
+            reasoning_tokens.unwrap()
+        );
+    }
+    dod_pass("8.9.10/gemini");
 }

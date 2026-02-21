@@ -15,6 +15,7 @@
 //! - 8.9.3: Image base64 ×3 providers
 //! - 8.9.4: Image URL ×3 providers
 
+use base64::Engine;
 use secrecy::SecretString;
 use unified_llm::client::ClientBuilder;
 use unified_llm::providers::anthropic::AnthropicAdapter;
@@ -200,6 +201,15 @@ async fn verify_image_base64(h: &ProviderTestHarness) {
                 img["source"]["data"].as_str().unwrap().len() > 0,
                 "anthropic: data should not be empty"
             );
+            // YELLOW-10: Verify base64 data decodes to the original input bytes
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(img["source"]["data"].as_str().unwrap())
+                .expect("anthropic: source.data should be valid base64");
+            assert_eq!(
+                decoded,
+                vec![0x89u8, 0x50, 0x4E, 0x47],
+                "anthropic: decoded base64 should match original image bytes"
+            );
         }
         "openai" => {
             // OpenAI: {type: "input_image", image_url: "data:image/png;base64,..."}
@@ -211,6 +221,18 @@ async fn verify_image_base64(h: &ProviderTestHarness) {
                 image_url.starts_with("data:image/png;base64,"),
                 "openai: should be data URI, got: {}",
                 image_url
+            );
+            // YELLOW-10: Verify the base64 payload decodes to the original input bytes
+            let b64_payload = image_url
+                .strip_prefix("data:image/png;base64,")
+                .expect("openai: data URI should have expected prefix");
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(b64_payload)
+                .expect("openai: base64 payload should be valid");
+            assert_eq!(
+                decoded,
+                vec![0x89u8, 0x50, 0x4E, 0x47],
+                "openai: decoded base64 should match original image bytes"
             );
         }
         "gemini" => {
@@ -228,6 +250,15 @@ async fn verify_image_base64(h: &ProviderTestHarness) {
             assert!(
                 img["inlineData"]["data"].as_str().unwrap().len() > 0,
                 "gemini: data should not be empty"
+            );
+            // YELLOW-10: Verify base64 data decodes to the original input bytes
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(img["inlineData"]["data"].as_str().unwrap())
+                .expect("gemini: inlineData.data should be valid base64");
+            assert_eq!(
+                decoded,
+                vec![0x89u8, 0x50, 0x4E, 0x47],
+                "gemini: decoded base64 should match original image bytes"
             );
         }
         _ => panic!("Unknown provider"),
@@ -682,4 +713,89 @@ async fn test_multimodal_openai() {
 #[tokio::test]
 async fn test_multimodal_gemini() {
     verify_multimodal_message(&ProviderTestHarness::gemini().await).await;
+}
+
+// ============================================================================
+// YELLOW-2: Image local file path → base64 integration test
+//
+// Verifies the full pipeline: local file path → pre_resolve_local_images →
+// base64 encode → correct provider format in outgoing request.
+// The adapter's do_complete calls pre_resolve_local_images before translating,
+// so a local path should arrive at the provider as base64 data.
+// ============================================================================
+
+#[tokio::test]
+async fn test_image_local_file_path_anthropic() {
+    let h = ProviderTestHarness::anthropic().await;
+    mount_ok_response(&h).await;
+
+    // Create a temporary PNG file on disk
+    let dir = std::env::temp_dir().join("unified_llm_test_local_image_y2");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("test_local.png");
+    let fake_png = vec![0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    std::fs::write(&file_path, &fake_png).unwrap();
+
+    // Send a request with a local file path (not base64, not a remote URL)
+    let req = Request::default()
+        .model("test-model")
+        .messages(vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentPart::text("Describe this image"),
+                ContentPart::Image {
+                    image: ImageData {
+                        url: Some(file_path.to_str().unwrap().to_string()),
+                        data: None,
+                        media_type: None,
+                        detail: None,
+                    },
+                },
+            ],
+            name: None,
+            tool_call_id: None,
+        }]);
+
+    let resp = h.client.complete(req).await.unwrap();
+    assert_eq!(resp.text(), "I see the image.");
+
+    // Verify the outgoing request contains base64-encoded data, NOT a file path
+    let requests = h.server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+
+    let content = body["messages"][0]["content"].as_array().unwrap();
+    let img = &content[1];
+
+    // Should be base64-encoded image, not a file path or URL
+    assert_eq!(img["type"], "image", "should be image type");
+    assert_eq!(
+        img["source"]["type"], "base64",
+        "should be base64 source, not a file path"
+    );
+    assert_eq!(
+        img["source"]["media_type"], "image/png",
+        "should infer image/png from .png extension"
+    );
+
+    // Verify the base64 data decodes to the original file contents
+    let b64_data = img["source"]["data"].as_str().unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64_data)
+        .expect("source.data should be valid base64");
+    assert_eq!(
+        decoded, fake_png,
+        "decoded base64 should match original file bytes"
+    );
+
+    // Verify NO file path string appears anywhere in the request body
+    let body_str = serde_json::to_string(&body).unwrap();
+    assert!(
+        !body_str.contains(file_path.to_str().unwrap()),
+        "request body should not contain the local file path"
+    );
+
+    // Cleanup
+    let _ = std::fs::remove_file(&file_path);
+    let _ = std::fs::remove_dir(&dir);
 }

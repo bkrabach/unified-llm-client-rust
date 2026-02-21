@@ -197,6 +197,26 @@ impl Error {
         }
     }
 
+    /// Convenience: no object generated error (structured output parsing/validation failure).
+    pub fn no_object_generated(reason: impl Into<String>, raw_text: impl Into<String>) -> Self {
+        let reason = reason.into();
+        let raw_text = raw_text.into();
+        Self {
+            kind: ErrorKind::NoObjectGenerated,
+            message: format!(
+                "Failed to generate structured output: {}. Raw text: {}",
+                reason, raw_text
+            ),
+            retryable: false,
+            source: None,
+            provider: None,
+            status_code: None,
+            error_code: None,
+            retry_after: None,
+            raw: None,
+        }
+    }
+
     /// Convenience: invalid tool call error.
     pub fn invalid_tool_call(message: impl Into<String>) -> Self {
         Self {

@@ -5,7 +5,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 use unified_llm_types::{
     AdapterTimeout, BoxFuture, BoxStream, Error, FinishReason, ProviderAdapter, Request, Response,
-    StreamEvent, StreamEventType, ToolCall, Usage,
+    StreamError, StreamEvent, StreamEventType, ToolCall, Usage,
 };
 
 use crate::util::sse::SseParser;
@@ -656,6 +656,36 @@ impl StreamTranslator {
                     ..Default::default()
                 });
             }
+            "error" => {
+                // CQ-15: Explicitly handle Anthropic SSE "error" events
+                let error_msg = data
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown Anthropic streaming error");
+                let error_type = data
+                    .get("error")
+                    .and_then(|e| e.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("unknown");
+                tracing::error!(
+                    "Anthropic SSE error event: type={}, message={}",
+                    error_type,
+                    error_msg
+                );
+                let provider_error = Error::from_http_status(
+                    500,
+                    format!("Anthropic streaming error: {}", error_msg),
+                    "anthropic",
+                    Some(data.clone()),
+                    None,
+                );
+                events.push(StreamEvent {
+                    event_type: StreamEventType::Error,
+                    error: Some(Box::new(StreamError::from_error(&provider_error))),
+                    ..Default::default()
+                });
+            }
             _ => {
                 // Forward unknown SSE events as PROVIDER_EVENT (spec §3.13, M-4)
                 events.push(StreamEvent {
@@ -799,7 +829,14 @@ pub(crate) fn translate_request(request: &Request) -> serde_json::Value {
                 let role_str = match msg.role {
                     unified_llm_types::Role::User => "user",
                     unified_llm_types::Role::Assistant => "assistant",
-                    _ => unreachable!(),
+                    other => {
+                        // CQ-1: Graceful handling instead of unreachable!()
+                        tracing::warn!(
+                            "Unexpected role {:?} in Anthropic message translation, skipping",
+                            other
+                        );
+                        continue;
+                    }
                 };
                 let content_blocks = translate_content_parts(&msg.content);
                 api_messages.push(serde_json::json!({
@@ -1149,7 +1186,13 @@ fn translate_content_parts(parts: &[unified_llm_types::ContentPart]) -> Vec<serd
                     })
                 })
             }
-            _ => None, // Audio, Document, Unknown — unsupported by Anthropic
+            other => {
+                tracing::warn!(
+                    "Dropping unsupported content part kind={:?} for provider=anthropic",
+                    other.kind()
+                );
+                None
+            }
         })
         .collect()
 }

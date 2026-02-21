@@ -764,7 +764,13 @@ fn translate_content_parts(parts: &[ContentPart]) -> Vec<serde_json::Value> {
                 }
                 Some(part)
             }
-            _ => None, // Audio, Document, Unknown — unsupported by Gemini
+            other => {
+                tracing::warn!(
+                    "Dropping unsupported content part kind={:?} for provider=gemini",
+                    other.kind()
+                );
+                None
+            }
         })
         .collect()
 }

@@ -61,11 +61,17 @@ pub fn stream_object<'a>(
     schema: serde_json::Value,
     client: &'a Client,
 ) -> Result<StreamObjectResult<'a>, Error> {
-    // Set response_format to json_schema (same pattern as generate_object)
+    // Set response_format to json_schema (same pattern as generate_object).
+    // CQ-6: Respect user-supplied strict setting; default to true for backward compat.
+    let strict = options
+        .response_format
+        .as_ref()
+        .map(|rf| rf.strict)
+        .unwrap_or(true);
     options.response_format = Some(ResponseFormat {
         r#type: "json_schema".to_string(),
         json_schema: Some(schema.clone()),
-        strict: true,
+        strict,
     });
 
     // Call stream() internally
@@ -255,20 +261,7 @@ impl<'a> StreamObjectResult<'a> {
 
 /// Create a NoObjectGenerated error with details.
 fn no_object_error(reason: &str, raw_text: &str) -> Error {
-    Error {
-        kind: ErrorKind::NoObjectGenerated,
-        message: format!(
-            "Failed to generate structured output: {}. Raw text: {}",
-            reason, raw_text
-        ),
-        retryable: false,
-        source: None,
-        provider: None,
-        status_code: None,
-        error_code: None,
-        retry_after: None,
-        raw: None,
-    }
+    Error::no_object_generated(reason, raw_text)
 }
 
 /// Attempt to parse partial JSON by closing unclosed braces, brackets, and strings.

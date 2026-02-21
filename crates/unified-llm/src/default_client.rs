@@ -42,7 +42,7 @@ pub fn get_default_client() -> Result<Arc<Client>, Error> {
     }
 
     // Slow path: acquire lock and double-check to prevent TOCTOU race
-    let _lock = INIT_LOCK.lock().unwrap();
+    let _lock = INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let guard = DEFAULT_CLIENT.load();
     if let Some(ref client) = **guard {
         return Ok(Arc::clone(client));

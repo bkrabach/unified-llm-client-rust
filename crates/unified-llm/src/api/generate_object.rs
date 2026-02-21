@@ -25,11 +25,17 @@ pub async fn generate_object(
     schema: serde_json::Value,
     client: &Client,
 ) -> Result<GenerateResult, Error> {
-    // Set response_format to json_schema
+    // Set response_format to json_schema.
+    // CQ-6: Respect user-supplied strict setting; default to true for backward compat.
+    let strict = options
+        .response_format
+        .as_ref()
+        .map(|rf| rf.strict)
+        .unwrap_or(true);
     options.response_format = Some(ResponseFormat {
         r#type: "json_schema".to_string(),
         json_schema: Some(schema.clone()),
-        strict: true,
+        strict,
     });
 
     // Call generate() internally
@@ -76,20 +82,7 @@ pub async fn generate_object_with_default(
 
 /// Create a NoObjectGenerated error with details.
 fn no_object_error(reason: &str, raw_text: &str) -> Error {
-    Error {
-        kind: ErrorKind::NoObjectGenerated,
-        message: format!(
-            "Failed to generate structured output: {}. Raw text: {}",
-            reason, raw_text
-        ),
-        retryable: false,
-        source: None,
-        provider: None,
-        status_code: None,
-        error_code: None,
-        retry_after: None,
-        raw: None,
-    }
+    Error::no_object_generated(reason, raw_text)
 }
 
 #[cfg(test)]

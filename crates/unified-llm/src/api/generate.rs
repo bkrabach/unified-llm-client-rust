@@ -177,6 +177,10 @@ async fn generate_inner(
             break; // natural completion
         }
         if round >= options.max_tool_rounds {
+            tracing::info!(
+                "max_tool_rounds={} reached, returning with pending tool calls",
+                options.max_tool_rounds
+            );
             break; // budget exhausted
         }
         if let Some(ref stop_when) = options.stop_when {
@@ -968,6 +972,70 @@ mod tests {
         // Key assertion: step 1 was NOT re-executed during the retry of step 2
         // If retry wrapped the entire loop, we'd see 3+ steps or the mock would
         // run out of actions. The fact that we get exactly 2 steps proves per-step retry.
+    }
+
+    #[tokio::test]
+    async fn test_generate_retry_budget_resets_between_steps() {
+        // YELLOW-4: Strengthen per-step retry test to explicitly prove the retry
+        // counter resets between tool loop steps.
+        //
+        // Scenario with max_retries=1 (each step tolerates exactly 1 failure):
+        //   Step 1: 429 error (retry #1) → tool call response → tool executes
+        //   Step 2: 500 error (retry #1) → final text response
+        //
+        // If retry budget were SHARED across steps (wrong behavior), step 1 would
+        // consume the single allowed retry, and step 2's failure would exceed the
+        // budget → the overall operation would fail.
+        //
+        // If retry budget RESETS per step (correct behavior), each step gets its
+        // own fresh budget of 1 retry, so both steps succeed.
+        //
+        // Mock queue (6 actions consumed in order):
+        //   1. Error 429         ← step 1, attempt 1 (fails, triggers retry)
+        //   2. tool call "echo"  ← step 1, attempt 2 (succeeds, tool executes)
+        //   3. Error 500         ← step 2, attempt 1 (fails, triggers retry)
+        //   4. text "Both reset" ← step 2, attempt 2 (succeeds, final answer)
+        let mock = MockProvider::new("mock")
+            // Step 1: fail once, then succeed with tool call
+            .with_error(Error::from_http_status(
+                429,
+                "rate limited".into(),
+                "mock",
+                None,
+                None,
+            ))
+            .with_response(make_tool_call_response("echo", "c1"))
+            // Step 2: fail once, then succeed with final text
+            .with_error(Error::from_http_status(
+                500,
+                "server error".into(),
+                "mock",
+                None,
+                None,
+            ))
+            .with_response(make_test_response("Both reset", "mock"));
+        let client = make_client_with_mock(mock);
+        let tool = echo_tool();
+        let opts = GenerateOptions::new("test")
+            .prompt("go")
+            .tools(vec![tool])
+            .max_tool_rounds(1)
+            .max_retries(1); // Each step tolerates exactly 1 failure
+
+        let result = generate(opts, &client).await.unwrap();
+
+        // Key assertions:
+        assert_eq!(result.text, "Both reset");
+        assert_eq!(result.steps.len(), 2);
+        // Step 1 produced a tool call that was executed
+        assert_eq!(result.steps[0].finish_reason.reason, "tool_calls");
+        assert!(!result.steps[0].tool_calls.is_empty());
+        assert!(!result.steps[0].tool_results.is_empty());
+        // Step 2 produced the final text
+        assert_eq!(result.steps[1].text, "Both reset");
+        assert_eq!(result.steps[1].finish_reason.reason, "stop");
+        // The fact that this test succeeds AT ALL is the proof: with a shared
+        // budget of 1, step 2's retry would fail because step 1 already used it.
     }
 
     // --- DoD 8.4.9: Cancellation via abort signal ---

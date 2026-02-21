@@ -30,6 +30,7 @@ httpdate = "1"
 wiremock = "0.6"
 serial_test = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+base64 = "0.22"
 
 [features]
 default = ["openai", "anthropic", "gemini"]

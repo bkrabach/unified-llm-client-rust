@@ -24,7 +24,7 @@ static EXTRA_MODELS: Lazy<RwLock<Vec<ModelInfo>>> = Lazy::new(|| RwLock::new(Vec
 pub fn load_catalog_from_json(json: &str) -> Result<(), Error> {
     let models: Vec<ModelInfo> = serde_json::from_str(json)
         .map_err(|e| Error::configuration(format!("Invalid catalog JSON: {e}")))?;
-    let mut extra = EXTRA_MODELS.write().unwrap();
+    let mut extra = EXTRA_MODELS.write().unwrap_or_else(|e| e.into_inner());
     extra.extend(models);
     Ok(())
 }
@@ -32,7 +32,7 @@ pub fn load_catalog_from_json(json: &str) -> Result<(), Error> {
 /// Merge additional models into the catalog at runtime.
 /// Merged models take precedence over built-in models with the same ID.
 pub fn merge_catalog(models: Vec<ModelInfo>) {
-    let mut extra = EXTRA_MODELS.write().unwrap();
+    let mut extra = EXTRA_MODELS.write().unwrap_or_else(|e| e.into_inner());
     extra.extend(models);
 }
 

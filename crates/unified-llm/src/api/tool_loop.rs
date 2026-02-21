@@ -145,15 +145,51 @@ pub async fn execute_all_tools(
                             };
                         };
 
+                        // CQ-3: Wrap each tool execution in a per-tool timeout (default 120s)
+                        let tool_timeout = std::time::Duration::from_secs(120);
                         let exec_result = if let Some(ref token) = abort_signal {
                             tokio::select! {
-                                result = exec_future => result,
+                                result = tokio::time::timeout(tool_timeout, exec_future) => {
+                                    match result {
+                                        Ok(inner) => inner,
+                                        Err(_) => Err(unified_llm_types::Error {
+                                            kind: unified_llm_types::ErrorKind::RequestTimeout,
+                                            message: format!(
+                                                "Tool '{}' timed out after {:?}",
+                                                call.name, tool_timeout
+                                            ),
+                                            retryable: false,
+                                            source: None,
+                                            provider: None,
+                                            status_code: None,
+                                            error_code: None,
+                                            retry_after: None,
+                                            raw: None,
+                                        }),
+                                    }
+                                }
                                 _ = token.cancelled() => {
                                     Err(unified_llm_types::Error::abort())
                                 }
                             }
                         } else {
-                            exec_future.await
+                            match tokio::time::timeout(tool_timeout, exec_future).await {
+                                Ok(inner) => inner,
+                                Err(_) => Err(unified_llm_types::Error {
+                                    kind: unified_llm_types::ErrorKind::RequestTimeout,
+                                    message: format!(
+                                        "Tool '{}' timed out after {:?}",
+                                        call.name, tool_timeout
+                                    ),
+                                    retryable: false,
+                                    source: None,
+                                    provider: None,
+                                    status_code: None,
+                                    error_code: None,
+                                    retry_after: None,
+                                    raw: None,
+                                }),
+                            }
                         };
 
                         match exec_result {
@@ -172,6 +208,12 @@ pub async fn execute_all_tools(
                     Some(_) => {
                         // M-8: Passive tool — return placeholder result to preserve ordering.
                         // The model expects results for all tool calls in order.
+                        // CQ-4: Warn when passive tool results are sent to the model
+                        tracing::warn!(
+                            "Passive tool '{}' called alongside active tools; \
+                             sending placeholder result to model",
+                            call.name
+                        );
                         ToolResult {
                             tool_call_id: call.id.clone(),
                             content: json!("Tool call returned to caller (passive tool)"),

@@ -1440,4 +1440,211 @@ mod tests {
             err.message
         );
     }
+
+    // --- YELLOW-1: Mid-flight cancellation (cancel after data flows) ---
+
+    #[tokio::test]
+    async fn test_stream_abort_mid_flight() {
+        // 8.4.9: Cancel AFTER receiving multiple TextDelta events (not before streaming).
+        // Verifies: abort terminates cleanly mid-stream, no events after cancellation.
+        use tokio_util::sync::CancellationToken;
+        tokio::time::pause();
+
+        let events = make_text_stream_events(&[
+            "chunk1", "chunk2", "chunk3", "chunk4", "chunk5", "chunk6", "chunk7", "chunk8",
+            "chunk9", "chunk10",
+        ]);
+        let mock = MockProvider::new("mock")
+            .with_stream_events(events)
+            .with_stream_delay(std::time::Duration::from_millis(100));
+        let client = make_client_with_mock(mock);
+
+        let token = CancellationToken::new();
+        let opts = GenerateOptions::new("test-model")
+            .prompt("Hi")
+            .abort_signal(token.clone());
+
+        let mut result = stream(opts, &client).unwrap();
+        let mut text_deltas = Vec::new();
+        let mut saw_abort = false;
+
+        while let Some(item) = result.next().await {
+            match item {
+                Ok(event) => {
+                    if event.event_type == StreamEventType::TextDelta {
+                        text_deltas.push(event.delta.unwrap());
+                        // Cancel mid-flight after receiving 3 TextDelta events
+                        if text_deltas.len() == 3 {
+                            token.cancel();
+                        }
+                    }
+                }
+                Err(e) => {
+                    assert_eq!(e.kind, ErrorKind::Abort);
+                    saw_abort = true;
+                    break;
+                }
+            }
+        }
+
+        // Must have received at least 3 TextDelta events before the abort
+        assert!(
+            text_deltas.len() >= 3,
+            "Expected at least 3 TextDeltas before abort, got {}",
+            text_deltas.len()
+        );
+        assert!(
+            saw_abort,
+            "Stream should have yielded AbortError after mid-flight cancellation"
+        );
+
+        // After abort, stream must be terminated — no more events
+        let trailing = result.next().await;
+        assert!(
+            trailing.is_none(),
+            "No events should be delivered after abort"
+        );
+    }
+
+    // --- YELLOW-8: No retry after many events (strengthens 1-event invariant) ---
+
+    #[tokio::test]
+    async fn test_stream_no_retry_after_many_events() {
+        // DoD 8.8.9: Strengthen the no-retry-after-partial invariant beyond "1 event".
+        // 10+ events yielded before error → Error event emitted, NOT retried.
+        let mut partial_events: Vec<Result<StreamEvent, Error>> = vec![
+            Ok(StreamEvent {
+                event_type: StreamEventType::StreamStart,
+                ..Default::default()
+            }),
+            Ok(StreamEvent {
+                event_type: StreamEventType::TextStart,
+                ..Default::default()
+            }),
+        ];
+        // Add 10 TextDelta events before the error
+        for i in 0..10 {
+            partial_events.push(Ok(StreamEvent {
+                event_type: StreamEventType::TextDelta,
+                delta: Some(format!("chunk{}", i)),
+                ..Default::default()
+            }));
+        }
+        // Then an error mid-stream
+        partial_events.push(Err(Error::from_http_status(
+            500,
+            "mid-stream error after many events".into(),
+            "mock",
+            None,
+            None,
+        )));
+
+        let mock = MockProvider::new("mock")
+            // Second stream (should NOT be reached due to no-retry-after-partial)
+            .with_stream_events(make_text_stream_events(&["Should not reach"]));
+
+        // Push the partial+error stream as the first stream action
+        mock.stream_actions
+            .lock()
+            .unwrap()
+            .insert(0, partial_events);
+
+        let client = make_client_with_mock(mock);
+        let opts = GenerateOptions::new("test-model")
+            .prompt("Hi")
+            .max_retries(3); // Retries available, but must NOT be used after partial data
+
+        let mut result = stream(opts, &client).unwrap();
+        let mut collected_types = Vec::new();
+        let mut text_delta_count = 0;
+        let mut had_error_event = false;
+
+        while let Some(item) = result.next().await {
+            match item {
+                Ok(event) => {
+                    collected_types.push(event.event_type.clone());
+                    if event.event_type == StreamEventType::TextDelta {
+                        text_delta_count += 1;
+                    }
+                    if event.event_type == StreamEventType::Error {
+                        had_error_event = true;
+                    }
+                }
+                Err(_) => {
+                    panic!("Should not get Err after partial data, should get Error event instead");
+                }
+            }
+        }
+
+        // Verify we received all 10 TextDelta events before the error
+        assert_eq!(
+            text_delta_count, 10,
+            "Should have received all 10 TextDelta events before the error"
+        );
+        // Verify an Error event was emitted (not an Err return)
+        assert!(
+            had_error_event,
+            "Should have emitted an Error event, not retried"
+        );
+        // Verify we did NOT get any events from the retry stream
+        assert!(
+            !collected_types.contains(&StreamEventType::Finish),
+            "Should NOT have retried — no Finish event from the retry stream"
+        );
+    }
+
+    // --- YELLOW-12: Combined total + per-step timeout (shorter wins) ---
+
+    #[tokio::test]
+    async fn test_combined_total_and_per_step_timeout() {
+        // Both total and per_step configured; the shorter one should fire first.
+        // per_step = 20ms, total = 100ms, mock delay = 500ms → per_step wins.
+        tokio::time::pause();
+
+        let events = make_text_stream_events(&["This should timeout"]);
+        let mock = MockProvider::new("mock")
+            .with_stream_events(events)
+            .with_stream_delay(std::time::Duration::from_millis(500));
+        let client = make_client_with_mock(mock);
+
+        let opts = GenerateOptions::new("test-model")
+            .prompt("Hi")
+            .timeout(TimeoutConfig {
+                total: Some(0.10),    // 100ms — the longer timeout
+                per_step: Some(0.02), // 20ms — the shorter timeout (should win)
+            });
+
+        let mut result = stream(opts, &client).unwrap();
+        let mut had_timeout_error = false;
+        let mut timeout_message = String::new();
+
+        while let Some(event) = result.next().await {
+            match event {
+                Ok(evt) if evt.event_type == StreamEventType::Error => {
+                    if let Some(ref err) = evt.error {
+                        if err.message.contains("timeout") || err.message.contains("Timeout") {
+                            had_timeout_error = true;
+                            timeout_message.clone_from(&err.message);
+                        }
+                    }
+                }
+                Err(e) if e.message.contains("timeout") || e.message.contains("Timeout") => {
+                    had_timeout_error = true;
+                    timeout_message.clone_from(&e.message);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            had_timeout_error,
+            "Should have received a timeout error when both timeouts are configured"
+        );
+        // The shorter timeout (per_step = 20ms) should win over the longer (total = 100ms)
+        assert!(
+            timeout_message.contains("Per-step"),
+            "Per-step timeout (shorter) should fire first, got: {}",
+            timeout_message
+        );
+    }
 }

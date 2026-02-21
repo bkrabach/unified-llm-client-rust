@@ -932,6 +932,106 @@ async fn test_error_429_gemini() {
 }
 
 // ============================================================================
+// DoD 8.9.12: 429 retry-then-succeed — transparent retry via generate() (×3)
+// ============================================================================
+
+/// Verify that a 429 response is retried transparently by api::generate()
+/// and succeeds when the retry gets a 200 response.
+///
+/// This complements verify_error_429 (which only tests error mapping at the
+/// client.complete() level) by exercising the full retry path through the
+/// high-level generate() API.
+async fn verify_error_429_retry_then_succeed(h: &ProviderTestHarness) {
+    // Build provider-specific error and success response bodies
+    let error_body = match h.provider_name.as_str() {
+        "anthropic" => anthropic_error_response("rate_limit_error", "Rate limited"),
+        "openai" => openai_error_response("rate_limit_error", "Rate limited"),
+        "gemini" => gemini_error_response(429, "RESOURCE_EXHAUSTED", "Rate limited"),
+        _ => panic!("Unknown provider"),
+    };
+    let success_body = match h.provider_name.as_str() {
+        "anthropic" => anthropic_text_response("Success after retry"),
+        "openai" => openai_text_response("Success after retry"),
+        "gemini" => gemini_text_response("Success after retry"),
+        _ => panic!("Unknown provider"),
+    };
+
+    // Mount sequenced responses using wiremock priorities:
+    //   Priority 1 (highest): 429 error with Retry-After: 0 — consumed first
+    //   Priority 2 (lower):   200 success — consumed on retry
+    let error_template = wiremock::ResponseTemplate::new(429)
+        .set_body_json(error_body)
+        .insert_header("retry-after", "0");
+    let success_template = wiremock::ResponseTemplate::new(200).set_body_json(success_body);
+
+    if h.provider_name == "gemini" {
+        let path_re = r"/v1beta/models/.+:generateContent";
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path_regex(path_re))
+            .respond_with(error_template)
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path_regex(path_re))
+            .respond_with(success_template)
+            .up_to_n_times(1)
+            .with_priority(2)
+            .mount(&h.server)
+            .await;
+    } else {
+        let path = match h.provider_name.as_str() {
+            "anthropic" => "/v1/messages",
+            "openai" => "/v1/responses",
+            _ => panic!("Unknown provider"),
+        };
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(error_template)
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(success_template)
+            .up_to_n_times(1)
+            .with_priority(2)
+            .mount(&h.server)
+            .await;
+    }
+
+    // Use api::generate() which has built-in retry logic (via with_retry).
+    // max_retries(1) = one retry attempt after the initial 429 failure.
+    let opts = GenerateOptions::new("test-model")
+        .messages(vec![Message::user("Hello")])
+        .max_retries(1);
+    let result = api::generate(opts, &h.client).await.unwrap();
+
+    assert_eq!(
+        result.text, "Success after retry",
+        "{}: 429 should be retried transparently and succeed",
+        h.provider_name
+    );
+}
+
+#[tokio::test]
+async fn test_error_429_retry_then_succeed_anthropic() {
+    verify_error_429_retry_then_succeed(&ProviderTestHarness::anthropic().await).await;
+}
+
+#[tokio::test]
+async fn test_error_429_retry_then_succeed_openai() {
+    verify_error_429_retry_then_succeed(&ProviderTestHarness::openai().await).await;
+}
+
+#[tokio::test]
+async fn test_error_429_retry_then_succeed_gemini() {
+    verify_error_429_retry_then_succeed(&ProviderTestHarness::gemini().await).await;
+}
+
+// ============================================================================
 // DoD 8.9.13: Usage token counts accurate (×3)
 // ============================================================================
 
@@ -1629,6 +1729,64 @@ async fn verify_stream_with_tools(h: &ProviderTestHarness) {
         text, "Weather result: sunny",
         "{}: accumulated text mismatch",
         h.provider_name
+    );
+
+    // YELLOW-6: Verify tool call arguments are correctly accumulated
+    // (not just that TOOL_CALL events exist, but that they carry expected data)
+
+    // ToolCallStart should exist with the correct tool name
+    let tc_start = events
+        .iter()
+        .find(|e| e.event_type == StreamEventType::ToolCallStart);
+    assert!(
+        tc_start.is_some(),
+        "{}: should have ToolCallStart event from tool call step",
+        h.provider_name
+    );
+    let tc_start = tc_start.unwrap();
+    assert!(
+        tc_start.tool_call.is_some(),
+        "{}: ToolCallStart should carry tool_call data",
+        h.provider_name
+    );
+    assert_eq!(
+        tc_start.tool_call.as_ref().unwrap().name,
+        "get_weather",
+        "{}: tool call name should be 'get_weather'",
+        h.provider_name
+    );
+
+    // ToolCallEnd should exist
+    let tc_end = events
+        .iter()
+        .find(|e| e.event_type == StreamEventType::ToolCallEnd);
+    assert!(
+        tc_end.is_some(),
+        "{}: should have ToolCallEnd event",
+        h.provider_name
+    );
+
+    // Verify the accumulated tool call arguments contain {"city": "SF"}.
+    // Check both the final ToolCallEnd event and accumulated deltas for robustness,
+    // since providers may place the final args on either.
+    let tc_deltas: String = events
+        .iter()
+        .filter(|e| e.event_type == StreamEventType::ToolCallDelta)
+        .filter_map(|e| e.delta.as_ref())
+        .cloned()
+        .collect();
+    let has_args_in_end = tc_end
+        .and_then(|e| e.tool_call.as_ref())
+        .map(|tc| tc.arguments.get("city").and_then(|v| v.as_str()) == Some("SF"))
+        .unwrap_or(false);
+    let has_args_in_deltas = tc_deltas.contains("city") && tc_deltas.contains("SF");
+    assert!(
+        has_args_in_end || has_args_in_deltas,
+        "{}: tool call arguments should contain {{\"city\":\"SF\"}} — \
+         end has args: {}, deltas: '{}'",
+        h.provider_name,
+        has_args_in_end,
+        tc_deltas
     );
 }
 
