@@ -147,11 +147,16 @@ pub fn stream_object_with_default(
         tc.validate()?;
     }
 
-    // Set response_format to json_schema (same as stream_object).
+    // MED-3: Respect user-supplied strict setting (same pattern as stream_object).
+    let strict = options
+        .response_format
+        .as_ref()
+        .map(|rf| rf.strict)
+        .unwrap_or(true);
     options.response_format = Some(ResponseFormat {
         r#type: "json_schema".to_string(),
         json_schema: Some(schema.clone()),
-        strict: true,
+        strict,
     });
 
     // Use stream_with_default's channel-decoupled stream, then layer

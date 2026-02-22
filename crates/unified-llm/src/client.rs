@@ -186,6 +186,30 @@ impl Client {
             builder = builder.provider("gemini", Box::new(adapter));
         }
 
+        // MED-4: Warn when API keys are present but the corresponding feature is disabled.
+        // This helps users understand why from_env() returns "No providers configured".
+        #[cfg(not(feature = "anthropic"))]
+        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+            tracing::warn!(
+                "ANTHROPIC_API_KEY is set but the 'anthropic' feature is not enabled. \
+                 Enable it in Cargo.toml to use Anthropic."
+            );
+        }
+        #[cfg(not(feature = "openai"))]
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            tracing::warn!(
+                "OPENAI_API_KEY is set but the 'openai' feature is not enabled. \
+                 Enable it in Cargo.toml to use OpenAI."
+            );
+        }
+        #[cfg(not(feature = "gemini"))]
+        if std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok() {
+            tracing::warn!(
+                "GEMINI_API_KEY/GOOGLE_API_KEY is set but the 'gemini' feature is not enabled. \
+                 Enable it in Cargo.toml to use Gemini."
+            );
+        }
+
         builder.build()
     }
 

@@ -10,7 +10,7 @@
     "supports_reasoning": true,
     "input_cost_per_million": 15.0,
     "output_cost_per_million": 75.0,
-    "aliases": ["opus", "claude-opus", "claude-opus-4"]
+    "aliases": ["opus", "claude-opus", "claude-opus-4", "claude-opus-4-6"]
   },
   {
     "id": "claude-sonnet-4-20250514",
@@ -23,7 +23,7 @@
     "supports_reasoning": true,
     "input_cost_per_million": 3.0,
     "output_cost_per_million": 15.0,
-    "aliases": ["sonnet", "claude-sonnet", "claude-sonnet-4"]
+    "aliases": ["sonnet", "claude-sonnet", "claude-sonnet-4", "claude-sonnet-4-5"]
   },
   {
     "id": "claude-3-5-haiku-latest",
@@ -49,7 +49,7 @@
     "supports_reasoning": true,
     "input_cost_per_million": 10.0,
     "output_cost_per_million": 40.0,
-    "aliases": ["openai-o3"]
+    "aliases": ["openai-o3", "gpt-5.2-codex"]
   },
   {
     "id": "o4-mini",
@@ -68,27 +68,27 @@
     "id": "gpt-4.1",
     "provider": "openai",
     "display_name": "GPT-4.1",
-    "context_window": 1047576,
+    "context_window": 1048576,
     "max_output": 32768,
     "supports_tools": true,
     "supports_vision": true,
     "supports_reasoning": false,
     "input_cost_per_million": 2.0,
     "output_cost_per_million": 8.0,
-    "aliases": ["4.1", "gpt-4.1-2025-04-14"]
+    "aliases": ["4.1", "gpt-4.1-2025-04-14", "gpt-5.2"]
   },
   {
     "id": "gpt-4.1-mini",
     "provider": "openai",
     "display_name": "GPT-4.1 Mini",
-    "context_window": 1047576,
+    "context_window": 1048576,
     "max_output": 32768,
     "supports_tools": true,
     "supports_vision": true,
     "supports_reasoning": false,
     "input_cost_per_million": 0.40,
     "output_cost_per_million": 1.60,
-    "aliases": ["4.1-mini", "gpt-4.1-mini-2025-04-14"]
+    "aliases": ["4.1-mini", "gpt-4.1-mini-2025-04-14", "gpt-5.2-mini"]
   },
   {
     "id": "gpt-4o",
@@ -127,7 +127,7 @@
     "supports_reasoning": true,
     "input_cost_per_million": 1.25,
     "output_cost_per_million": 10.0,
-    "aliases": ["gemini-pro", "gemini-2.5-pro"]
+    "aliases": ["gemini-pro", "gemini-2.5-pro", "gemini-3-pro-preview"]
   },
   {
     "id": "gemini-2.5-flash-preview-05-20",
@@ -140,7 +140,7 @@
     "supports_reasoning": true,
     "input_cost_per_million": 0.15,
     "output_cost_per_million": 0.60,
-    "aliases": ["gemini-flash", "flash", "gemini-2.5-flash"]
+    "aliases": ["gemini-flash", "flash", "gemini-2.5-flash", "gemini-3-flash-preview"]
   },
   {
     "id": "gemini-2.0-flash",

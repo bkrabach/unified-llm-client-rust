@@ -1475,6 +1475,17 @@ pub(crate) fn parse_response(
         raw: usage_obj.cloned(),
     };
 
+    // CRIT-2: Surface that Anthropic reasoning_tokens is an estimate, not provider-reported.
+    let mut response_warnings: Vec<unified_llm_types::Warning> = vec![];
+    if reasoning_tokens.is_some() {
+        response_warnings.push(unified_llm_types::Warning {
+            message: "reasoning_tokens is estimated from thinking text length (~chars/4), \
+                      not provider-reported. Use for directional cost estimates only."
+                .to_string(),
+            code: Some("reasoning_tokens_estimated".to_string()),
+        });
+    }
+
     Ok(Response {
         id,
         model,
@@ -1488,7 +1499,7 @@ pub(crate) fn parse_response(
         finish_reason,
         usage,
         raw: Some(raw),
-        warnings: vec![],
+        warnings: response_warnings,
         rate_limit: crate::util::http::parse_rate_limit_headers(headers),
     })
 }

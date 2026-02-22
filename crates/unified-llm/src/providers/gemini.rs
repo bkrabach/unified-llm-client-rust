@@ -899,7 +899,15 @@ pub(crate) fn parse_response(
                     content_parts.push(ContentPart::Text {
                         text: text.to_string(),
                     });
+                    continue;
                 }
+
+                // LOW-1: Unrecognized parts (e.g. executableCode, codeExecutionResult)
+                // are logged rather than silently dropped. Matches streaming behavior (M-1).
+                tracing::debug!(
+                    "Gemini non-streaming: unrecognized content part, preserving in raw: {:?}",
+                    part
+                );
             }
         }
     }
