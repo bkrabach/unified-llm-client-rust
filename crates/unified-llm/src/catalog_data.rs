@@ -31,9 +31,16 @@ pub fn load_catalog_from_json(json: &str) -> Result<(), Error> {
 
 /// Merge additional models into the catalog at runtime.
 /// Merged models take precedence over built-in models with the same ID.
+/// GAP-4: Deduplicates by model `id` — newer entries replace older ones.
 pub fn merge_catalog(models: Vec<ModelInfo>) {
     let mut extra = EXTRA_MODELS.write().unwrap_or_else(|e| e.into_inner());
-    extra.extend(models);
+    for model in models {
+        if let Some(existing) = extra.iter_mut().find(|m| m.id == model.id) {
+            *existing = model;
+        } else {
+            extra.push(model);
+        }
+    }
 }
 
 /// Look up a model by its exact `id` or by any of its `aliases`.

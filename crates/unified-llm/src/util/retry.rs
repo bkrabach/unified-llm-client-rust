@@ -44,8 +44,9 @@ where
                 }
 
                 // If retry_after exceeds max_delay, raise immediately
+                // DEF-1: Spec §6.6 says "If Retry-After > max_delay" (strict >)
                 if let Some(retry_after) = &err.retry_after {
-                    if retry_after.as_secs_f64() >= policy.max_delay {
+                    if retry_after.as_secs_f64() > policy.max_delay {
                         return Err(err);
                     }
                 }
@@ -416,11 +417,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retry_after_equal_to_max_delay_raises_immediately() {
-        // DEFECT-2: Spec §6.6 says "If Retry-After >= max_delay: raise immediately."
-        // retry_after=60s, max_delay=60.0 — should NOT retry.
+    async fn test_retry_after_equal_to_max_delay_retries() {
+        // DEF-1: Spec §6.6 says "If Retry-After > max_delay" (strict >).
+        // When retry_after == max_delay exactly, it should retry (60 is NOT > 60).
         let policy = RetryPolicy {
-            max_retries: 3,
+            max_retries: 1,
             base_delay: 0.001,
             max_delay: 60.0,
             backoff_multiplier: 2.0,
@@ -433,25 +434,30 @@ mod tests {
         let result: Result<i32, Error> = with_retry(&policy, || {
             let attempt = attempt_clone.clone();
             async move {
-                attempt.fetch_add(1, Ordering::SeqCst);
-                // retry_after of 60 seconds == max_delay of 60 seconds
-                Err(Error::from_http_status(
-                    429,
-                    "Rate limited".into(),
-                    "test",
-                    None,
-                    Some(Duration::from_secs(60)),
-                ))
+                let n = attempt.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    // First attempt: fail with retry_after == max_delay
+                    Err(Error::from_http_status(
+                        429,
+                        "Rate limited".into(),
+                        "test",
+                        None,
+                        Some(Duration::from_secs(60)),
+                    ))
+                } else {
+                    // Second attempt: succeed
+                    Ok(42)
+                }
             }
         })
         .await;
 
-        let err = result.unwrap_err();
-        assert_eq!(err.kind, ErrorKind::RateLimit);
+        // Should have retried and succeeded on attempt 2
+        assert_eq!(result.unwrap(), 42);
         assert_eq!(
             attempt.load(Ordering::SeqCst),
-            1,
-            "Should NOT retry when retry_after == max_delay"
+            2,
+            "Should retry when retry_after == max_delay (spec: > not >=)"
         );
     }
 

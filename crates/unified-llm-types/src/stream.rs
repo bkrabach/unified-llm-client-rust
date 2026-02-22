@@ -97,6 +97,12 @@ pub struct StreamError {
     /// How long to wait before retrying (from provider `Retry-After` header).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after: Option<std::time::Duration>,
+    /// Provider-specific machine-readable error code (DEF-3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Raw provider error response body (DEF-3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<serde_json::Value>,
 }
 
 impl StreamError {
@@ -109,6 +115,8 @@ impl StreamError {
             provider: None,
             status_code: None,
             retry_after: None,
+            error_code: None,
+            raw: None,
         }
     }
     /// Create from a message string with `RequestTimeout` kind (retryable per spec §6.3).
@@ -120,9 +128,11 @@ impl StreamError {
             provider: None,
             status_code: None,
             retry_after: None,
+            error_code: None,
+            raw: None,
         }
     }
-    /// Create from a full `Error` reference, preserving provider context.
+    /// Create from a full `Error` reference, preserving all provider context (DEF-3).
     pub fn from_error(error: &crate::error::Error) -> Self {
         Self {
             kind: error.kind,
@@ -131,6 +141,8 @@ impl StreamError {
             provider: error.provider.clone(),
             status_code: error.status_code,
             retry_after: error.retry_after,
+            error_code: error.error_code.clone(),
+            raw: error.raw.clone(),
         }
     }
 }
@@ -444,6 +456,8 @@ mod tests {
                 provider: None,
                 status_code: None,
                 retry_after: None,
+                error_code: None,
+                raw: None,
             })),
             ..Default::default()
         };

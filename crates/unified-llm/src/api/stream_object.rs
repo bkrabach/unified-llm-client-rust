@@ -623,6 +623,8 @@ mod tests {
                     provider: None,
                     status_code: None,
                     retry_after: None,
+                    error_code: None,
+                    raw: None,
                 })),
                 ..Default::default()
             }),

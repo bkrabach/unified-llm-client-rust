@@ -55,10 +55,21 @@ impl ClientBuilder {
         self
     }
 
-    /// Build the Client. Returns ConfigurationError if no providers are registered.
+    /// Build the Client. Returns ConfigurationError if no providers are registered
+    /// or if `default_provider` names a provider that wasn't registered.
     pub fn build(self) -> Result<Client, Error> {
         if self.providers.is_empty() {
             return Err(Error::configuration("No providers configured"));
+        }
+        // GAP-2: Validate default_provider exists at build time
+        if let Some(ref name) = self.default_provider {
+            if !self.providers.contains_key(name) {
+                return Err(Error::configuration(format!(
+                    "default_provider '{}' not found in registered providers: {:?}",
+                    name,
+                    self.providers.keys().collect::<Vec<_>>()
+                )));
+            }
         }
         Ok(Client {
             providers: self.providers,

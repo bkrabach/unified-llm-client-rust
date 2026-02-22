@@ -61,11 +61,12 @@ impl Message {
         content: impl Into<String>,
         is_error: bool,
     ) -> Self {
+        let id = tool_call_id.into();
         Self {
             role: Role::Tool,
             content: vec![ContentPart::ToolResult {
                 tool_result: ToolResultData {
-                    tool_call_id: tool_call_id.into(),
+                    tool_call_id: id.clone(),
                     content: serde_json::Value::String(content.into()),
                     is_error,
                     image_data: None,
@@ -73,7 +74,8 @@ impl Message {
                 },
             }],
             name: None,
-            tool_call_id: None,
+            // DEF-2: Spec §3.5 shows tool_call_id on the outer Message envelope
+            tool_call_id: Some(id),
         }
     }
 
@@ -135,6 +137,12 @@ mod tests {
     fn test_message_tool_result_constructor() {
         let msg = Message::tool_result("call_1", "sunny, 72F", false);
         assert_eq!(msg.role, Role::Tool);
+        // DEF-2: Spec §3.5 requires tool_call_id on the outer Message envelope
+        assert_eq!(
+            msg.tool_call_id,
+            Some("call_1".to_string()),
+            "outer Message.tool_call_id must be set per spec §3.5"
+        );
         match &msg.content[0] {
             ContentPart::ToolResult { tool_result } => {
                 assert_eq!(tool_result.tool_call_id, "call_1");
