@@ -4085,6 +4085,11 @@ mod tests {
         );
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 10000);
+        // C-1: max_tokens must be auto-adjusted above budget_tokens
+        assert_eq!(
+            body["max_tokens"], 11024,
+            "max_tokens should be auto-adjusted above budget_tokens (10000 + 1024)"
+        );
     }
 
     #[test]
@@ -4105,6 +4110,11 @@ mod tests {
             .reasoning_effort("medium");
         let (body, _) = translate_request(&request);
         assert_eq!(body["thinking"]["budget_tokens"], 4096);
+        // C-1: max_tokens must be auto-adjusted above budget_tokens
+        assert_eq!(
+            body["max_tokens"], 5120,
+            "max_tokens should be auto-adjusted above budget_tokens (4096 + 1024)"
+        );
     }
 
     #[test]

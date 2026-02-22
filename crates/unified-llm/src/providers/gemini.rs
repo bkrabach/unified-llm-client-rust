@@ -2372,6 +2372,48 @@ mod tests {
     }
 
     #[test]
+    fn test_gemini_stream_unrecognized_part_emits_provider_event() {
+        let mut translator = GeminiStreamTranslator::new();
+
+        // M-1: Unrecognized part types (e.g. executableCode) should emit ProviderEvent
+        let chunk = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "executableCode": {"code": "print(1)", "language": "PYTHON"}
+                    }],
+                    "role": "model"
+                }
+            }]
+        });
+
+        let events = translator.process(&chunk);
+        let types: Vec<_> = events.iter().map(|e| &e.event_type).collect();
+
+        // Should have: StreamStart, ProviderEvent (for the unrecognized part)
+        assert!(
+            types.contains(&&StreamEventType::StreamStart),
+            "should emit StreamStart"
+        );
+        assert!(
+            types.contains(&&StreamEventType::ProviderEvent),
+            "unrecognized part should emit ProviderEvent, got: {:?}",
+            types
+        );
+
+        // The ProviderEvent should carry the raw part data
+        let provider_event = events
+            .iter()
+            .find(|e| e.event_type == StreamEventType::ProviderEvent)
+            .unwrap();
+        let raw = provider_event.raw.as_ref().unwrap();
+        assert!(
+            raw.get("executableCode").is_some(),
+            "ProviderEvent raw should contain the original executableCode part"
+        );
+    }
+
+    #[test]
     fn test_stream_finalize_without_finish_reason() {
         let mut translator = GeminiStreamTranslator::new();
 
