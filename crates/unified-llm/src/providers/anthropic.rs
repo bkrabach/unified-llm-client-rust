@@ -116,7 +116,12 @@ impl AnthropicAdapter {
         if let Some(headers) = default_headers {
             builder = builder.default_headers(headers);
         }
-        builder.build().expect("Failed to build HTTP client")
+        // L-8: Return Result instead of panicking on client build failure
+        builder.build().unwrap_or_else(|e| {
+            tracing::error!("Failed to build HTTP client: {}", e);
+            // Fallback to default client — better than panicking in a library
+            reqwest::Client::new()
+        })
     }
 }
 
@@ -269,7 +274,11 @@ impl AnthropicAdapter {
 
             let url = format!("{}/v1/messages", self.base_url);
             let beta_headers = collect_beta_headers(&request);
-            let (mut body, _translation_warnings) = translate_request_with_cache(&request);
+            let (mut body, translation_warnings) = translate_request_with_cache(&request);
+            // L-4: Log warnings that can't be attached to streaming responses
+            for w in &translation_warnings {
+                tracing::warn!("Translation warning (streaming): {}", w.message);
+            }
             // Add stream: true to the request body
             if let Some(obj) = body.as_object_mut() {
                 obj.insert("stream".into(), serde_json::Value::Bool(true));
@@ -316,6 +325,8 @@ impl AnthropicAdapter {
 
             let mut translator = StreamTranslator::new();
             let stream_read_timeout = self.stream_read_timeout;
+            // L-6: Buffer for incomplete UTF-8 sequences across chunk boundaries
+            let mut utf8_remainder: Vec<u8> = Vec::new();
 
             loop {
                 // C-2/stream_read: enforce per-chunk timeout
@@ -342,12 +353,35 @@ impl AnthropicAdapter {
                     }
                 };
 
-                let chunk_str = match std::str::from_utf8(&chunk) {
-                    Ok(s) => s,
-                    Err(_) => continue, // Skip invalid UTF-8 chunks
+                // L-6: Buffer partial UTF-8 sequences across chunks instead of dropping them.
+                // Prepend any leftover bytes from the previous chunk.
+                let full_chunk = if utf8_remainder.is_empty() {
+                    chunk.to_vec()
+                } else {
+                    let mut combined = std::mem::take(&mut utf8_remainder);
+                    combined.extend_from_slice(&chunk);
+                    combined
+                };
+                let chunk_str = match std::str::from_utf8(&full_chunk) {
+                    Ok(s) => s.to_string(),
+                    Err(e) => {
+                        // Valid prefix up to the error point
+                        let valid_up_to = e.valid_up_to();
+                        if valid_up_to == 0 && full_chunk.len() < 4 {
+                            // Entire chunk is an incomplete multi-byte sequence — buffer it
+                            utf8_remainder = full_chunk;
+                            continue;
+                        }
+                        // Save the incomplete tail for the next chunk
+                        utf8_remainder = full_chunk[valid_up_to..].to_vec();
+                        // Process the valid prefix
+                        std::str::from_utf8(&full_chunk[..valid_up_to])
+                            .unwrap_or("")
+                            .to_string()
+                    }
                 };
 
-                let sse_events = parser.feed(chunk_str);
+                let sse_events = parser.feed(&chunk_str);
 
                 for sse_event in sse_events {
                     let event_type = match &sse_event.event_type {
@@ -596,27 +630,38 @@ impl StreamTranslator {
                     }
                     Some("tool_use") => {
                         // Build complete tool_call from accumulated state
-                        let tool_call =
-                            if self.active_tool_id.is_some() || self.active_tool_name.is_some() {
-                                let id = self.active_tool_id.take().unwrap_or_default();
-                                let name = self.active_tool_name.take().unwrap_or_default();
-                                let arguments: serde_json::Map<String, serde_json::Value> =
-                                    serde_json::from_str(self.accumulated_tool_json.as_str())
-                                        .unwrap_or_default();
-                                let raw_arguments = if self.accumulated_tool_json.is_empty() {
-                                    None
-                                } else {
-                                    Some(self.accumulated_tool_json.clone())
+                        let tool_call = if self.active_tool_id.is_some()
+                            || self.active_tool_name.is_some()
+                        {
+                            let id = self.active_tool_id.take().unwrap_or_default();
+                            let name = self.active_tool_name.take().unwrap_or_default();
+                            let arguments: serde_json::Map<String, serde_json::Value> =
+                                match serde_json::from_str(self.accumulated_tool_json.as_str()) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        // L-7: Warn on tool JSON deserialization failure
+                                        tracing::warn!(
+                                                "Failed to parse tool call arguments as JSON: {}. Raw: '{}'",
+                                                e,
+                                                &self.accumulated_tool_json[..self.accumulated_tool_json.len().min(200)]
+                                            );
+                                        serde_json::Map::new()
+                                    }
                                 };
-                                Some(ToolCall {
-                                    id,
-                                    name,
-                                    arguments,
-                                    raw_arguments,
-                                })
-                            } else {
+                            let raw_arguments = if self.accumulated_tool_json.is_empty() {
                                 None
+                            } else {
+                                Some(self.accumulated_tool_json.clone())
                             };
+                            Some(ToolCall {
+                                id,
+                                name,
+                                arguments,
+                                raw_arguments,
+                            })
+                        } else {
+                            None
+                        };
                         events.push(StreamEvent {
                             event_type: StreamEventType::ToolCallEnd,
                             tool_call,
@@ -661,6 +706,9 @@ impl StreamTranslator {
                     .as_deref()
                     .map(map_finish_reason)
                     .unwrap_or_else(FinishReason::stop);
+                // M-2: Anthropic does not provide a separate reasoning token count.
+                // This is an APPROXIMATION based on thinking text character count / 4.
+                // Actual token counts may differ. Use for directional cost estimates only.
                 let reasoning_tokens = if self.thinking_text_length > 0 {
                     Some((self.thinking_text_length / 4) as u32)
                 } else {
@@ -699,8 +747,18 @@ impl StreamTranslator {
                     error_type,
                     error_msg
                 );
+                // L-5: Map Anthropic SSE error.type to proper HTTP status
+                let status_code = match error_type {
+                    "overloaded_error" => 529,
+                    "rate_limit_error" => 429,
+                    "authentication_error" => 401,
+                    "permission_error" => 403,
+                    "not_found_error" => 404,
+                    "invalid_request_error" => 400,
+                    _ => 500, // api_error and unknown types
+                };
                 let provider_error = Error::from_http_status(
-                    500,
+                    status_code,
                     format!("Anthropic streaming error: {}", error_msg),
                     "anthropic",
                     Some(data.clone()),
@@ -1017,6 +1075,16 @@ pub(crate) fn translate_request(
                 "high" => 10000,
                 _ => 4096, // default to medium for unknown values
             };
+            // C-1: Anthropic requires budget_tokens < max_tokens.
+            // Auto-adjust max_tokens upward if budget would equal or exceed it.
+            let current_max = body
+                .get("max_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(DEFAULT_MAX_TOKENS as u64);
+            if budget as u64 >= current_max {
+                let new_max = budget as u64 + 1024; // leave room for visible output
+                body.insert("max_tokens".into(), serde_json::json!(new_max));
+            }
             body.insert(
                 "thinking".into(),
                 serde_json::json!({
@@ -1214,7 +1282,17 @@ fn translate_content_parts(
                         serde_json::Value::Object(map.clone())
                     }
                     unified_llm_types::ArgumentValue::Raw(s) => {
-                        serde_json::from_str(s).unwrap_or(serde_json::json!({}))
+                        // L-7: Warn on tool JSON deserialization failure in outbound path
+                        match serde_json::from_str(s) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to parse outbound tool arguments as JSON: {}",
+                                    e
+                                );
+                                serde_json::json!({})
+                            }
+                        }
                     }
                 };
                 Some(serde_json::json!({

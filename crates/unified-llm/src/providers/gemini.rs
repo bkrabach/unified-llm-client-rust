@@ -1166,7 +1166,7 @@ impl GeminiStreamTranslator {
                     continue;
                 }
 
-                // Text part
+                // Text part (must be last — catch-all below handles anything else)
                 if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                     // Emit ReasoningEnd when transitioning from reasoning to text
                     if self.reasoning_started {
@@ -1197,6 +1197,14 @@ impl GeminiStreamTranslator {
                         event_type: StreamEventType::TextDelta,
                         delta: Some(text.to_string()),
                         text_id: self.current_text_id.clone(),
+                        ..Default::default()
+                    });
+                } else {
+                    // M-1: Forward unrecognized part types as PROVIDER_EVENT
+                    // (e.g. executableCode, codeExecutionResult, etc.)
+                    events.push(StreamEvent {
+                        event_type: StreamEventType::ProviderEvent,
+                        raw: Some(part.clone()),
                         ..Default::default()
                     });
                 }

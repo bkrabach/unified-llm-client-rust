@@ -219,7 +219,11 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
             }
 
             let url = format!("{}/v1/chat/completions", self.base_url);
-            let (mut body, _translation_warnings) = translate_request(&request);
+            let (mut body, translation_warnings) = translate_request(&request);
+            // L-4: Log warnings that can't be attached to streaming responses
+            for w in &translation_warnings {
+                tracing::warn!("Translation warning (streaming): {}", w.message);
+            }
 
             // Enable streaming + request usage in stream
             if let Some(obj) = body.as_object_mut() {

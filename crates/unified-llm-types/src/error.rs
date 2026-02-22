@@ -25,6 +25,8 @@ pub enum ErrorKind {
     Stream,
     InvalidToolCall,
     NoObjectGenerated,
+    /// L-3: Implementation extension beyond the spec's 16-type hierarchy.
+    /// Maps semantically to InvalidRequest but kept separate for precise error handling.
     UnsupportedToolChoice,
     Configuration,
 }

@@ -1117,6 +1117,60 @@ async fn compliance_8_9_15_provider_options_anthropic() {
     dod_pass("8.9.15/anthropic");
 }
 
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_15_provider_options_openai() {
+    let client = require_client();
+    let result = with_compliance_retry(3, 2, || {
+        let opts = GenerateOptions::new(OPENAI_MODEL)
+            .prompt("Say hello in one sentence.")
+            .max_tokens(100)
+            .provider("openai")
+            .provider_options(serde_json::json!({
+                "openai": {
+                    "store": false
+                }
+            }));
+        let client = &client;
+        async move { unified_llm::generate(opts, client).await }
+    })
+    .await
+    .expect("openai provider_options should not cause an error");
+
+    assert!(
+        !result.text.is_empty(),
+        "openai: text should not be empty with provider_options"
+    );
+    dod_pass("8.9.15/openai");
+}
+
+#[tokio::test]
+#[ignore]
+async fn compliance_8_9_15_provider_options_gemini() {
+    let client = require_client();
+    let result = with_compliance_retry(3, 2, || {
+        let opts = GenerateOptions::new(GEMINI_MODEL)
+            .prompt("Say hello in one sentence.")
+            .max_tokens(100)
+            .provider("gemini")
+            .provider_options(serde_json::json!({
+                "gemini": {
+                    "safetySettings": []
+                }
+            }));
+        let client = &client;
+        async move { unified_llm::generate(opts, client).await }
+    })
+    .await
+    .expect("gemini provider_options should not cause an error");
+
+    assert!(
+        !result.text.is_empty(),
+        "gemini: text should not be empty with provider_options"
+    );
+    dod_pass("8.9.15/gemini");
+}
+
 // ---------------------------------------------------------------------------
 // stream_object() compliance — streaming structured output (spec §4.6)
 // ---------------------------------------------------------------------------

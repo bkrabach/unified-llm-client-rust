@@ -182,7 +182,11 @@ impl OpenAiAdapter {
             }
 
             let url = format!("{}/v1/responses", self.base_url);
-            let (mut body, _translation_warnings) = translate_request(&request);
+            let (mut body, translation_warnings) = translate_request(&request);
+            // L-4: Log warnings that can't be attached to streaming responses
+            for w in &translation_warnings {
+                tracing::warn!("Translation warning (streaming): {}", w.message);
+            }
             // Add stream: true to the request body
             if let Some(obj) = body.as_object_mut() {
                 obj.insert("stream".into(), serde_json::Value::Bool(true));
