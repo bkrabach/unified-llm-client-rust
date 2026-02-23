@@ -443,7 +443,13 @@ pub(crate) fn translate_request(request: &Request) -> (serde_json::Value, Vec<Wa
         body.insert("stop".into(), json!(stop));
     }
 
-    // reasoning_effort — silently ignored (not available in Chat Completions)
+    // P1-4: Warn when reasoning_effort is present but dropped
+    if request.reasoning_effort.is_some() {
+        tracing::warn!(
+            "reasoning_effort is set but the OpenAI-compatible adapter (Chat Completions) \
+             does not support it. Use the native OpenAI adapter for reasoning models."
+        );
+    }
     // The spec explicitly says: "does not support reasoning tokens"
 
     // Tools — nested {type: "function", function: {...}} format

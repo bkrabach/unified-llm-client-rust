@@ -229,6 +229,10 @@ pub struct GenerateOptions {
     /// Called when schema validation fails, given (tool_call, error_message).
     /// Returns corrected arguments or None to propagate the error.
     pub repair_tool_call: Option<RepairToolCallFn>,
+    /// Whether to validate tool call arguments against the tool's JSON Schema
+    /// before passing to the execute handler. Default: true.
+    /// Set to false to skip validation (spec §5.8: "Optionally validates").
+    pub validate_tool_args: bool,
 }
 
 impl GenerateOptions {
@@ -255,6 +259,7 @@ impl GenerateOptions {
             timeout: None,
             abort_signal: None,
             repair_tool_call: None,
+            validate_tool_args: true,
         }
     }
 

@@ -88,6 +88,9 @@ pub fn stream<'a>(options: GenerateOptions, client: &'a Client) -> Result<Stream
             .and_then(|t| t.per_step)
             .map(Duration::from_secs_f64);
 
+        // P0-1: Shared retry counter — inner first-read retry shares budget with outer
+        let mut retries_remaining: u32 = max_retries;
+
         for round in 0..=max_tool_rounds {
             // Check cancellation before each step (DoD 8.4.9)
             if let Some(ref token) = abort_signal {
@@ -220,25 +223,21 @@ pub fn stream<'a>(options: GenerateOptions, client: &'a Client) -> Result<Stream
                         yield Ok(event);
                     }
                     Err(e) => {
-                        if !events_yielded && e.retryable && max_retries > 0 {
-                            // Error before any events in this step — retry connection.
-                            let retry_policy_inner = RetryPolicy {
-                                max_retries,
-                                ..Default::default()
-                            };
-                            match with_retry(&retry_policy_inner, || {
-                                let req = request.clone();
-                                async move {
-                                    let s = client.stream(req)?;
-                                    Ok(s)
-                                }
-                            }).await {
+                        // P0-1: Single shared retry budget. The outer with_retry (line 118)
+                        // may have consumed some retries for connection failures.
+                        // This inner path handles first-read errors (stream created OK
+                        // but first event is Err). We use a shared counter to ensure
+                        // total attempts never exceed max_retries + 1.
+                        if !events_yielded && e.retryable && retries_remaining > 0 {
+                            retries_remaining -= 1;
+                            // Re-create the stream for this step
+                            match client.stream(request.clone()) {
                                 Ok(new_stream) => {
                                     provider_stream = new_stream;
                                     continue;
                                 }
-                                Err(retry_err) => {
-                                    yield Err(retry_err);
+                                Err(reconnect_err) => {
+                                    yield Err(reconnect_err);
                                     return;
                                 }
                             }

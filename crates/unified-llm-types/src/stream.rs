@@ -193,6 +193,10 @@ pub struct StreamEvent {
     /// Raw provider event data for passthrough.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<serde_json::Value>,
+
+    /// Non-fatal warnings (P0-2: spec §3.13 — "STREAM_START — May include warnings").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<crate::response::Warning>,
 }
 
 impl Default for StreamEvent {
@@ -209,6 +213,7 @@ impl Default for StreamEvent {
             response: None,
             error: None,
             raw: None,
+            warnings: Vec::new(),
         }
     }
 }
