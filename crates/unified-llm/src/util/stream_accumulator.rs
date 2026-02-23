@@ -5,6 +5,15 @@ use unified_llm_types::message::Message;
 use unified_llm_types::response::{FinishReason, Response, Usage};
 use unified_llm_types::stream::{StreamEvent, StreamEventType};
 
+/// A single accumulated reasoning/thinking block from the stream.
+#[derive(Debug, Clone)]
+struct ReasoningBlock {
+    text_parts: Vec<String>,
+    signature: Option<String>,
+    redacted: bool,
+    opaque_data: Option<String>,
+}
+
 /// Accumulates stream events into a complete Response.
 ///
 /// Process events via `process()`, then call `response()` to get the
@@ -14,12 +23,16 @@ pub struct StreamAccumulator {
     model: String,
     provider: String,
     text_parts: Vec<String>,
-    /// Completed reasoning blocks: each entry is (text_parts, signature).
-    reasoning_blocks: Vec<(Vec<String>, Option<String>)>,
+    /// Completed reasoning blocks.
+    reasoning_blocks: Vec<ReasoningBlock>,
     /// In-progress reasoning block's text parts (between ReasoningStart and ReasoningEnd).
     current_reasoning_parts: Vec<String>,
     /// In-progress reasoning block's signature (set by ReasoningEnd before finalization).
     current_reasoning_signature: Option<String>,
+    /// Whether the current in-progress reasoning block is redacted.
+    current_reasoning_redacted: bool,
+    /// Opaque data for the current redacted reasoning block.
+    current_reasoning_data: Option<String>,
     tool_calls: Vec<ToolCallData>,
     /// Buffer for the current in-progress tool call's arguments.
     current_tool_id: Option<String>,
@@ -47,6 +60,8 @@ impl StreamAccumulator {
             reasoning_blocks: Vec::new(),
             current_reasoning_parts: Vec::new(),
             current_reasoning_signature: None,
+            current_reasoning_redacted: false,
+            current_reasoning_data: None,
             tool_calls: Vec::new(),
             current_tool_id: None,
             current_tool_name: None,
@@ -170,35 +185,49 @@ impl StreamAccumulator {
                 self.finished = true;
             }
             StreamEventType::ReasoningEnd => {
-                // Capture thinking signature from raw field if present
-                // (Anthropic sends {"signature": "..."} on ReasoningEnd)
+                // Capture signature, redacted flag, and opaque data from raw field
+                // (Anthropic sends {"signature": "...", "redacted": true, "data": "..."})
                 if let Some(raw) = &event.raw {
                     if let Some(sig) = raw.get("signature").and_then(|v| v.as_str()) {
                         self.current_reasoning_signature = Some(sig.to_string());
+                    }
+                    // CRITICAL-2: Extract redacted flag and opaque data payload
+                    if raw.get("redacted").and_then(|v| v.as_bool()) == Some(true) {
+                        self.current_reasoning_redacted = true;
+                    }
+                    if let Some(data) = raw.get("data").and_then(|v| v.as_str()) {
+                        self.current_reasoning_data = Some(data.to_string());
                     }
                 }
                 // Finalize the current reasoning block
                 if !self.current_reasoning_parts.is_empty()
                     || self.current_reasoning_signature.is_some()
+                    || self.current_reasoning_redacted
                 {
-                    self.reasoning_blocks.push((
-                        std::mem::take(&mut self.current_reasoning_parts),
-                        self.current_reasoning_signature.take(),
-                    ));
+                    self.reasoning_blocks.push(ReasoningBlock {
+                        text_parts: std::mem::take(&mut self.current_reasoning_parts),
+                        signature: self.current_reasoning_signature.take(),
+                        redacted: self.current_reasoning_redacted,
+                        opaque_data: self.current_reasoning_data.take(),
+                    });
+                    self.current_reasoning_redacted = false;
                 }
             }
             StreamEventType::ReasoningStart => {
                 // If there's an in-progress block that was never finalized by
-                // ReasoningEnd (shouldn't happen in well-formed streams, but
-                // be defensive), push it before starting a new one.
-                if !self.current_reasoning_parts.is_empty() {
-                    self.reasoning_blocks.push((
-                        std::mem::take(&mut self.current_reasoning_parts),
-                        self.current_reasoning_signature.take(),
-                    ));
+                // ReasoningEnd, push it before starting a new one.
+                if !self.current_reasoning_parts.is_empty() || self.current_reasoning_redacted {
+                    self.reasoning_blocks.push(ReasoningBlock {
+                        text_parts: std::mem::take(&mut self.current_reasoning_parts),
+                        signature: self.current_reasoning_signature.take(),
+                        redacted: self.current_reasoning_redacted,
+                        opaque_data: self.current_reasoning_data.take(),
+                    });
                 }
                 self.current_reasoning_parts.clear();
                 self.current_reasoning_signature = None;
+                self.current_reasoning_redacted = false;
+                self.current_reasoning_data = None;
             }
             // TextStart, TextEnd, Error, ProviderEvent
             // are acknowledged but don't require accumulation logic
@@ -216,6 +245,8 @@ impl StreamAccumulator {
         self.reasoning_blocks.clear();
         self.current_reasoning_parts.clear();
         self.current_reasoning_signature = None;
+        self.current_reasoning_redacted = false;
+        self.current_reasoning_data = None;
         self.tool_calls.clear();
         self.current_tool_id = None;
         self.current_tool_name = None;
@@ -253,29 +284,51 @@ impl StreamAccumulator {
         // Build content parts
         let mut content: Vec<ContentPart> = Vec::new();
 
-        // Emit one ContentPart::Thinking per completed reasoning block
-        for (parts, signature) in &self.reasoning_blocks {
-            content.push(ContentPart::Thinking {
-                thinking: ThinkingData {
-                    text: parts.join(""),
-                    signature: signature.clone(),
-                    redacted: false,
-                    data: None,
-                },
-            });
+        // CRITICAL-2: Emit ContentPart::Thinking or ContentPart::RedactedThinking
+        // per completed reasoning block, based on the redacted flag.
+        for block in &self.reasoning_blocks {
+            if block.redacted {
+                content.push(ContentPart::RedactedThinking {
+                    thinking: ThinkingData {
+                        text: block.text_parts.join(""),
+                        signature: block.signature.clone(),
+                        redacted: true,
+                        data: block.opaque_data.clone(),
+                    },
+                });
+            } else {
+                content.push(ContentPart::Thinking {
+                    thinking: ThinkingData {
+                        text: block.text_parts.join(""),
+                        signature: block.signature.clone(),
+                        redacted: false,
+                        data: None,
+                    },
+                });
+            }
         }
 
-        // Finalize any in-progress reasoning block (stream ended without ReasoningEnd,
-        // or build_response() called mid-stream via current_response())
-        if !self.current_reasoning_parts.is_empty() {
-            content.push(ContentPart::Thinking {
-                thinking: ThinkingData {
-                    text: self.current_reasoning_parts.join(""),
-                    signature: self.current_reasoning_signature.clone(),
-                    redacted: false,
-                    data: None,
-                },
-            });
+        // Finalize any in-progress reasoning block
+        if !self.current_reasoning_parts.is_empty() || self.current_reasoning_redacted {
+            if self.current_reasoning_redacted {
+                content.push(ContentPart::RedactedThinking {
+                    thinking: ThinkingData {
+                        text: self.current_reasoning_parts.join(""),
+                        signature: self.current_reasoning_signature.clone(),
+                        redacted: true,
+                        data: self.current_reasoning_data.clone(),
+                    },
+                });
+            } else {
+                content.push(ContentPart::Thinking {
+                    thinking: ThinkingData {
+                        text: self.current_reasoning_parts.join(""),
+                        signature: self.current_reasoning_signature.clone(),
+                        redacted: false,
+                        data: None,
+                    },
+                });
+            }
         }
 
         // Add text content

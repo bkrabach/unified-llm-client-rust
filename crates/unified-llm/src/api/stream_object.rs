@@ -91,20 +91,31 @@ pub fn stream_object<'a>(
                 }
             };
 
-            if event.event_type == StreamEventType::TextDelta {
-                if let Some(delta) = &event.delta {
-                    accumulated_text.push_str(delta);
+            // CRITICAL-1: Accumulate both TextDelta (normal providers) and
+            // ToolCallDelta (Anthropic tool-based extraction) events.
+            // When Anthropic uses the synthetic structured_output tool, the JSON
+            // arrives as tool call argument deltas, not text deltas.
+            let delta = match event.event_type {
+                StreamEventType::TextDelta => event.delta.as_deref(),
+                StreamEventType::ToolCallDelta => {
+                    // Tool call deltas carry JSON fragments in the delta field
+                    // (the accumulated tool arguments ARE the structured output)
+                    event.delta.as_deref()
+                }
+                _ => None,
+            };
+            if let Some(delta_str) = delta {
+                accumulated_text.push_str(delta_str);
 
-                    // Try to parse partial JSON
-                    if let Some(partial) = try_parse_partial(&accumulated_text) {
-                        // Only yield if the object actually changed
-                        if last_yielded.as_ref() != Some(&partial) {
-                            last_yielded = Some(partial.clone());
-                            yield Ok(PartialObject {
-                                object: partial,
-                                raw_text: accumulated_text.clone(),
-                            });
-                        }
+                // Try to parse partial JSON
+                if let Some(partial) = try_parse_partial(&accumulated_text) {
+                    // Only yield if the object actually changed
+                    if last_yielded.as_ref() != Some(&partial) {
+                        last_yielded = Some(partial.clone());
+                        yield Ok(PartialObject {
+                            object: partial,
+                            raw_text: accumulated_text.clone(),
+                        });
                     }
                 }
             }
@@ -178,18 +189,23 @@ pub fn stream_object_with_default(
                 }
             };
 
-            if event.event_type == StreamEventType::TextDelta {
-                if let Some(delta) = &event.delta {
-                    accumulated_text.push_str(delta);
+            // CRITICAL-1: Same fix as stream_object — accumulate both TextDelta
+            // and ToolCallDelta for Anthropic tool-based extraction.
+            let delta = match event.event_type {
+                StreamEventType::TextDelta => event.delta.as_deref(),
+                StreamEventType::ToolCallDelta => event.delta.as_deref(),
+                _ => None,
+            };
+            if let Some(delta_str) = delta {
+                accumulated_text.push_str(delta_str);
 
-                    if let Some(partial) = try_parse_partial(&accumulated_text) {
-                        if last_yielded.as_ref() != Some(&partial) {
-                            last_yielded = Some(partial.clone());
-                            yield Ok(PartialObject {
-                                object: partial,
-                                raw_text: accumulated_text.clone(),
-                            });
-                        }
+                if let Some(partial) = try_parse_partial(&accumulated_text) {
+                    if last_yielded.as_ref() != Some(&partial) {
+                        last_yielded = Some(partial.clone());
+                        yield Ok(PartialObject {
+                            object: partial,
+                            raw_text: accumulated_text.clone(),
+                        });
                     }
                 }
             }

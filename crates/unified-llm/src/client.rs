@@ -247,31 +247,36 @@ impl Client {
     /// Send a completion request, routing to the appropriate provider.
     /// If middleware is registered, runs the onion chain (request phase in
     /// registration order, response phase in reverse order).
+    /// MAJOR-2: Provider resolution now happens AFTER request-phase middleware runs,
+    /// so middleware can modify `request.provider` for failover/routing/A-B testing.
     pub async fn complete(&self, request: Request) -> Result<Response, Error> {
         request.validate()?;
-        let provider = self.resolve_provider(&request)?;
 
         if self.middleware.is_empty() {
+            let provider = self.resolve_provider(&request)?;
             return provider.complete(request).await;
         }
 
-        self.run_complete_chain(request, provider, 0).await
+        self.run_complete_chain(request, 0).await
     }
 
     /// Recursively build the middleware onion for complete requests.
-    /// At `index == middleware.len()`, calls the provider directly.
+    /// At `index == middleware.len()`, resolves the provider and calls it.
     fn run_complete_chain<'a>(
         &'a self,
         request: Request,
-        provider: &'a dyn ProviderAdapter,
         index: usize,
     ) -> BoxFuture<'a, Result<Response, Error>> {
         if index >= self.middleware.len() {
-            return provider.complete(request);
+            // Terminal node: resolve provider from the (possibly modified) request
+            return Box::pin(async move {
+                let provider = self.resolve_provider(&request)?;
+                provider.complete(request).await
+            });
         }
         let mw = &self.middleware[index];
         let next = Next {
-            complete_fn: Box::new(move |req| self.run_complete_chain(req, provider, index + 1)),
+            complete_fn: Box::new(move |req| self.run_complete_chain(req, index + 1)),
             stream_fn: Box::new(|_| {
                 Box::pin(async {
                     Err(Error::configuration(
@@ -285,21 +290,22 @@ impl Client {
 
     /// Send a streaming request, routing to the appropriate provider.
     /// If middleware is registered, runs the onion chain for streaming.
+    /// MAJOR-2: Provider resolution now happens AFTER request-phase middleware for streaming too.
     pub fn stream(
         &self,
         request: Request,
     ) -> Result<BoxStream<'_, Result<StreamEvent, Error>>, Error> {
         request.validate()?;
-        let provider = self.resolve_provider(&request)?;
 
         if self.middleware.is_empty() {
+            let provider = self.resolve_provider(&request)?;
             return Ok(provider.stream(request));
         }
 
         // Return a stream that lazily evaluates the middleware chain.
         Ok(Box::pin(async_stream::stream! {
             use futures::StreamExt;
-            match self.run_stream_chain(request, provider, 0).await {
+            match self.run_stream_chain(request, 0).await {
                 Ok(mut inner) => {
                     while let Some(event) = inner.next().await {
                         yield event;
@@ -313,15 +319,18 @@ impl Client {
     }
 
     /// Recursively build the middleware onion for stream requests.
-    /// At `index == middleware.len()`, calls the provider directly.
+    /// At `index == middleware.len()`, resolves the provider and calls it.
     fn run_stream_chain<'a>(
         &'a self,
         request: Request,
-        provider: &'a dyn ProviderAdapter,
         index: usize,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<StreamEvent, Error>>, Error>> {
         if index >= self.middleware.len() {
-            return Box::pin(async move { Ok(provider.stream(request)) });
+            // Terminal node: resolve provider from the (possibly modified) request
+            return Box::pin(async move {
+                let provider = self.resolve_provider(&request)?;
+                Ok(provider.stream(request))
+            });
         }
         let mw = &self.middleware[index];
         let next = Next {
@@ -332,7 +341,7 @@ impl Client {
                     ))
                 })
             }),
-            stream_fn: Box::new(move |req| self.run_stream_chain(req, provider, index + 1)),
+            stream_fn: Box::new(move |req| self.run_stream_chain(req, index + 1)),
         };
         mw.process_stream(request, next)
     }
