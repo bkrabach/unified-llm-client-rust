@@ -673,6 +673,89 @@ mod tests {
         assert_eq!(obj["x"], 1);
     }
 
+    /// Helper: make stream events that simulate ToolCallDelta accumulation
+    /// (Anthropic tool-based structured output extraction path).
+    fn make_tool_call_delta_events(json_fragments: &[&str]) -> Vec<StreamEvent> {
+        let mut events = vec![
+            StreamEvent {
+                event_type: StreamEventType::StreamStart,
+                id: Some("stream_tc".into()),
+                ..Default::default()
+            },
+            StreamEvent {
+                event_type: StreamEventType::ToolCallStart,
+                tool_call: Some(ToolCall {
+                    id: "call_structured".into(),
+                    name: "structured_output".into(),
+                    arguments: serde_json::Map::new(),
+                    raw_arguments: None,
+                }),
+                ..Default::default()
+            },
+        ];
+        for fragment in json_fragments {
+            events.push(StreamEvent {
+                event_type: StreamEventType::ToolCallDelta,
+                delta: Some((*fragment).into()),
+                ..Default::default()
+            });
+        }
+        events.push(StreamEvent {
+            event_type: StreamEventType::ToolCallEnd,
+            ..Default::default()
+        });
+        events.push(StreamEvent {
+            event_type: StreamEventType::Finish,
+            finish_reason: Some(FinishReason::stop()),
+            usage: Some(Usage {
+                input_tokens: 10,
+                output_tokens: 8,
+                total_tokens: 18,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        events
+    }
+
+    #[tokio::test]
+    async fn test_stream_object_tool_call_delta_accumulation() {
+        // Exercises the ToolCallDelta accumulation path used by Anthropic's
+        // synthetic tool extraction for structured output.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            },
+            "required": ["name", "age"]
+        });
+
+        let events =
+            make_tool_call_delta_events(&[r#"{"na"#, r#"me": "Alice""#, r#", "age"#, r#"": 30}"#]);
+        let mock = MockProvider::new("mock").with_stream_events(events);
+        let client = make_client_with_mock(mock);
+
+        let opts = GenerateOptions::new("test-model").prompt("Extract: Alice is 30 years old.");
+        let mut result = stream_object(opts, schema, &client).unwrap();
+
+        let mut partial_count = 0;
+        while let Some(partial) = result.next().await {
+            let p = partial.unwrap();
+            partial_count += 1;
+            assert!(p.object.is_object(), "Each partial should be a JSON object");
+        }
+
+        assert!(
+            partial_count > 0,
+            "Should have received at least one partial from ToolCallDelta events"
+        );
+
+        let final_obj = result.object().unwrap();
+        assert_eq!(final_obj["name"], "Alice");
+        assert_eq!(final_obj["age"], 30);
+    }
+
     #[tokio::test]
     async fn test_stream_object_connection_error() {
         // A non-retryable connection error (401) is yielded as an Err through the stream

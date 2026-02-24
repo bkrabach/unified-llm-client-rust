@@ -1,6 +1,6 @@
 //! Integration smoke tests with real API keys.
 //!
-//! Run with: cargo test -p unified-llm --test smoke_test -- --ignored --test-threads=1
+//! Run with: cargo test -p unified-llm --test smoke_test -- --test-threads=1
 //!
 //! Requires: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY (or GOOGLE_API_KEY)
 //!

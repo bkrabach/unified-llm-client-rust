@@ -300,7 +300,9 @@ pub fn stream<'a>(options: GenerateOptions, client: &'a Client) -> Result<Stream
             }
 
             // Execute active tools concurrently
-            let call_refs: Vec<&content::ToolCallData> = tool_calls.into_iter().collect();
+            let call_data: Vec<content::ToolCallData> =
+                tool_calls.into_iter().map(content::ToolCallData::from).collect();
+            let call_refs: Vec<&content::ToolCallData> = call_data.iter().collect();
             let tool_results = execute_all_tools(
                 tools,
                 &call_refs,

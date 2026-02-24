@@ -707,13 +707,11 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_x");
         assert_eq!(calls[0].name, "calc");
-        // Arguments should be the parsed dict from tool_call field
-        match &calls[0].arguments {
-            ArgumentValue::Dict(map) => {
-                assert_eq!(map.get("expr").unwrap(), &serde_json::json!("2+2"));
-            }
-            other => panic!("expected Dict, got {:?}", other),
-        }
+        // ToolCall.arguments is already a parsed Map<String, Value>
+        assert_eq!(
+            calls[0].arguments.get("expr").unwrap(),
+            &serde_json::json!("2+2")
+        );
     }
 
     #[test]

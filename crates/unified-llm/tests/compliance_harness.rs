@@ -1,6 +1,6 @@
 //! Real-API compliance harness — maps to DoD §8.9 cross-provider parity cells.
 //!
-//! Run with: cargo test -p unified-llm --test compliance_harness -- --ignored --test-threads=1
+//! Run with: cargo test -p unified-llm --test compliance_harness -- --test-threads=1
 //!
 //! Requires: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY (or GOOGLE_API_KEY)
 //!
@@ -1217,6 +1217,43 @@ async fn compliance_stream_object_gemini() {
     assert_eq!(final_obj["name"], "Alice");
     assert_eq!(final_obj["age"], 30);
     dod_pass("stream_object/gemini");
+}
+
+#[tokio::test]
+async fn compliance_stream_object_anthropic() {
+    use futures::StreamExt;
+    use unified_llm::api::stream_object::stream_object;
+
+    let client = require_client();
+    // Anthropic does not support "additionalProperties" in schemas.
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" },
+            "age": { "type": "integer" }
+        },
+        "required": ["name", "age"]
+    });
+    let opts = GenerateOptions::new(ANTHROPIC_MODEL)
+        .prompt("Extract: Alice is 30 years old. Return JSON with name and age.")
+        .max_tokens(200)
+        .provider("anthropic");
+
+    let mut result =
+        stream_object(opts, schema, &client).expect("stream_object() should not fail upfront");
+    let mut partial_count = 0;
+    while let Some(partial) = result.next().await {
+        let _p = partial.expect("Partial should not error");
+        partial_count += 1;
+    }
+    assert!(
+        partial_count > 0,
+        "Should have received at least one partial"
+    );
+    let final_obj = result.object().expect("Final object should be valid");
+    assert_eq!(final_obj["name"], "Alice");
+    assert_eq!(final_obj["age"], 30);
+    dod_pass("stream_object/anthropic");
 }
 
 // ---------------------------------------------------------------------------

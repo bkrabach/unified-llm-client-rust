@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::content::{ContentPart, ThinkingData, ToolCallData};
+use crate::content::{ContentPart, ThinkingData};
 use crate::message::Message;
+use crate::tool::ToolCall;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
@@ -25,13 +26,13 @@ impl Response {
         self.message.text()
     }
 
-    /// Extract tool calls from the message.
-    pub fn tool_calls(&self) -> Vec<&ToolCallData> {
+    /// Extract tool calls from the message as high-level `ToolCall` values.
+    pub fn tool_calls(&self) -> Vec<ToolCall> {
         self.message
             .content
             .iter()
             .filter_map(|p| match p {
-                ContentPart::ToolCall { tool_call } => Some(tool_call),
+                ContentPart::ToolCall { tool_call } => Some(ToolCall::from(tool_call.clone())),
                 _ => None,
             })
             .collect()

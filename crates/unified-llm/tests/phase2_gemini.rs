@@ -242,13 +242,15 @@ async fn test_gemini_tool_call_with_synthetic_id() {
 
     // Function name and arguments should be correct
     assert_eq!(tool_calls[0].name, "get_weather");
-    match &tool_calls[0].arguments {
-        ArgumentValue::Dict(map) => {
-            assert_eq!(map.get("city").unwrap(), &serde_json::json!("NYC"));
-            assert_eq!(map.get("unit").unwrap(), &serde_json::json!("fahrenheit"));
-        }
-        ArgumentValue::Raw(s) => panic!("Expected Dict arguments, got Raw: {s}"),
-    }
+    // ToolCall.arguments is already a parsed Map<String, Value>
+    assert_eq!(
+        tool_calls[0].arguments.get("city").unwrap(),
+        &serde_json::json!("NYC")
+    );
+    assert_eq!(
+        tool_calls[0].arguments.get("unit").unwrap(),
+        &serde_json::json!("fahrenheit")
+    );
 }
 
 #[tokio::test]

@@ -156,7 +156,11 @@ async fn generate_inner(
 
         // Execute tools if conditions are met
         let tool_results = if is_tool_call && has_active && round < options.max_tool_rounds {
-            let call_refs: Vec<&ToolCallData> = response_tool_calls.into_iter().collect();
+            let call_data: Vec<ToolCallData> = response_tool_calls
+                .into_iter()
+                .map(ToolCallData::from)
+                .collect();
+            let call_refs: Vec<&ToolCallData> = call_data.iter().collect();
             execute_all_tools(
                 tools,
                 &call_refs,
@@ -347,24 +351,7 @@ pub(crate) fn build_step_result(response: &Response, tool_results: Vec<ToolResul
     StepResult {
         text: response.text(),
         reasoning: response.reasoning(),
-        tool_calls: response
-            .tool_calls()
-            .into_iter()
-            .map(|tc| {
-                let (arguments, raw_arguments) = match &tc.arguments {
-                    ArgumentValue::Dict(m) => (m.clone(), None),
-                    ArgumentValue::Raw(s) => {
-                        (serde_json::from_str(s).unwrap_or_default(), Some(s.clone()))
-                    }
-                };
-                ToolCall {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    arguments,
-                    raw_arguments,
-                }
-            })
-            .collect(),
+        tool_calls: response.tool_calls(),
         tool_results,
         finish_reason: response.finish_reason.clone(),
         usage: response.usage.clone(),

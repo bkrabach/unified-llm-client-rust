@@ -805,25 +805,13 @@ async fn verify_single_tool_call(h: &ProviderTestHarness) {
         h.provider_name
     );
 
-    // Arguments contain the city
-    match &tool_calls[0].arguments {
-        ArgumentValue::Dict(map) => {
-            assert_eq!(
-                map.get("city").unwrap(),
-                &serde_json::json!("SF"),
-                "{}: tool call argument mismatch",
-                h.provider_name
-            );
-        }
-        ArgumentValue::Raw(s) => {
-            let parsed: serde_json::Value = serde_json::from_str(s).unwrap();
-            assert_eq!(
-                parsed["city"], "SF",
-                "{}: tool call argument mismatch (raw)",
-                h.provider_name
-            );
-        }
-    }
+    // Arguments contain the city (ToolCall.arguments is already a parsed Map)
+    assert_eq!(
+        tool_calls[0].arguments.get("city").unwrap(),
+        &serde_json::json!("SF"),
+        "{}: tool call argument mismatch",
+        h.provider_name
+    );
 }
 
 #[tokio::test]

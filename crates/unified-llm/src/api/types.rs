@@ -177,7 +177,9 @@ impl std::fmt::Debug for Tool {
 /// Options for the `generate()` and `stream()` functions.
 ///
 /// Use the builder pattern:
-/// ```ignore
+/// ```no_run
+/// use unified_llm::api::types::GenerateOptions;
+///
 /// let opts = GenerateOptions::new("claude-sonnet-4")
 ///     .prompt("Explain photosynthesis")
 ///     .temperature(0.7)

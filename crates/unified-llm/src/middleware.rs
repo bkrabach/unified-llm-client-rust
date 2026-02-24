@@ -75,14 +75,18 @@ pub trait Middleware: Send + Sync {
 /// - Response: finish reason, token usage, duration
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
 /// use std::sync::Arc;
+/// use unified_llm::client::Client;
 /// use unified_llm::middleware::LoggingMiddleware;
+/// use unified_llm::providers::anthropic::AnthropicAdapter;
 ///
+/// let adapter = AnthropicAdapter::from_env().unwrap();
 /// let client = Client::builder()
-///     .provider("anthropic", adapter)
+///     .provider("anthropic", Box::new(adapter))
 ///     .middleware(Arc::new(LoggingMiddleware))
-///     .build()?;
+///     .build()
+///     .unwrap();
 /// ```
 pub struct LoggingMiddleware;
 

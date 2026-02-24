@@ -32,7 +32,10 @@ impl OpenAICompatibleAdapter {
     /// Uses default timeouts: connect=10s, request=120s.
     ///
     /// # Examples
-    /// ```ignore
+    /// ```no_run
+    /// use secrecy::SecretString;
+    /// use unified_llm::providers::openai_compat::OpenAICompatibleAdapter;
+    ///
     /// let adapter = OpenAICompatibleAdapter::new(
     ///     SecretString::from("sk-..."),
     ///     "https://my-vllm-instance.example.com",

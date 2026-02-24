@@ -1878,10 +1878,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_abc");
         assert_eq!(calls[0].name, "get_weather");
-        match &calls[0].arguments {
-            ArgumentValue::Dict(m) => assert_eq!(m["city"], "SF"),
-            _ => panic!("Expected Dict arguments"),
-        }
+        // ToolCall.arguments is already a parsed Map<String, Value>
+        assert_eq!(calls[0].arguments["city"], "SF");
     }
 
     #[test]
