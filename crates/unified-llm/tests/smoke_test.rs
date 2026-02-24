@@ -10,7 +10,7 @@ use unified_llm::api::types::GenerateOptions;
 use unified_llm::client::Client;
 
 /// Cost-conscious models for smoke testing.
-const ANTHROPIC_MODEL: &str = "claude-3-5-haiku-latest";
+const ANTHROPIC_MODEL: &str = "claude-sonnet-4-20250514";
 const OPENAI_MODEL: &str = "gpt-4o-mini";
 const GEMINI_MODEL: &str = "gemini-2.0-flash";
 
@@ -32,7 +32,6 @@ fn all_providers() -> Vec<(&'static str, &'static str)> {
 
 /// DoD 8.10.1: Basic generation across all 3 providers.
 #[tokio::test]
-#[ignore]
 async fn test_smoke_basic_generation_all_providers() {
     let client = require_api_keys();
 
@@ -68,7 +67,6 @@ async fn test_smoke_basic_generation_all_providers() {
 
 /// DoD 8.10.2: Streaming across all 3 providers.
 #[tokio::test]
-#[ignore]
 async fn test_smoke_streaming() {
     use futures::StreamExt;
     use unified_llm::api::stream::stream;
@@ -114,7 +112,6 @@ async fn test_smoke_streaming() {
 
 /// DoD 8.10.3: Tool calling with parallel execution across all 3 providers.
 #[tokio::test]
-#[ignore]
 async fn test_smoke_tool_calling() {
     use unified_llm::api::types::Tool;
 
@@ -186,7 +183,6 @@ async fn test_smoke_tool_calling() {
 
 /// DoD 8.10.4: Image input across all 3 providers.
 #[tokio::test]
-#[ignore]
 async fn test_smoke_image_input() {
     use unified_llm_types::{ContentPart, Message, Role};
 
@@ -231,7 +227,6 @@ async fn test_smoke_image_input() {
 /// - Anthropic: uses tool-based structured output extraction (synthetic tool with forced tool_choice)
 /// - Gemini: rejects additionalProperties in schemas
 #[tokio::test]
-#[ignore]
 async fn test_smoke_structured_output() {
     use unified_llm::generate_object;
 
@@ -289,7 +284,6 @@ async fn test_smoke_structured_output() {
 
 /// DoD 8.10.6: Error handling across all 3 providers.
 #[tokio::test]
-#[ignore]
 async fn test_smoke_error_handling() {
     let client = require_api_keys();
 
