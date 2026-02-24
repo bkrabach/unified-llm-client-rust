@@ -11,7 +11,7 @@ use unified_llm::client::Client;
 
 /// Cost-conscious models for compliance testing.
 const OPENAI_MODEL: &str = "gpt-4o-mini";
-const ANTHROPIC_MODEL: &str = "claude-3-5-haiku-latest";
+const ANTHROPIC_MODEL: &str = "claude-sonnet-4-20250514";
 const GEMINI_MODEL: &str = "gemini-2.0-flash";
 
 /// Require a client or panic (skip the test).
@@ -836,7 +836,7 @@ async fn compliance_8_9_11_auth_error_anthropic() {
         .provider("anthropic", Box::new(adapter))
         .build()
         .unwrap();
-    let opts = GenerateOptions::new("claude-3-5-haiku-latest")
+    let opts = GenerateOptions::new("claude-sonnet-4-20250514")
         .prompt("test")
         .provider("anthropic")
         .max_retries(0);
@@ -1567,7 +1567,7 @@ async fn compliance_8_6_9_multi_turn_caching_gemini() {
 
 /// A well-known, stable public image URL for integration testing.
 const TEST_IMAGE_URL: &str =
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png";
+    "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png";
 
 #[tokio::test]
 #[ignore]
