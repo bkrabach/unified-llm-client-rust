@@ -26,7 +26,7 @@
     "aliases": ["sonnet", "claude-sonnet", "claude-sonnet-4"]
   },
   {
-    "id": "claude-3-5-haiku-latest",
+    "id": "claude-3-5-haiku-20241022",
     "provider": "anthropic",
     "display_name": "Claude 3.5 Haiku",
     "context_window": 200000,

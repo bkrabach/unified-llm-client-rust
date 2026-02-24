@@ -340,7 +340,7 @@ mod tests {
         let cases = vec![
             ("opus", "anthropic", "claude-opus-4-20250514"),
             ("sonnet", "anthropic", "claude-sonnet-4-20250514"),
-            ("haiku", "anthropic", "claude-3-5-haiku-latest"),
+            ("haiku", "anthropic", "claude-3-5-haiku-20241022"),
             ("gemini-flash", "gemini", "gemini-2.5-flash-preview-05-20"),
             ("gemini-pro", "gemini", "gemini-2.5-pro-preview-05-06"),
             ("4o", "openai", "gpt-4o"),
