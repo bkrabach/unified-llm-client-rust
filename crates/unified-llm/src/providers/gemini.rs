@@ -750,6 +750,51 @@ fn translate_content_parts(parts: &[ContentPart]) -> (Vec<serde_json::Value>, Ve
                     })
                 }
             }
+            ContentPart::Audio { audio } => {
+                if let Some(ref data) = audio.data {
+                    let b64 = crate::util::image::base64_encode(data);
+                    let media_type = audio.media_type.as_deref().unwrap_or("audio/mpeg");
+                    Some(serde_json::json!({
+                        "inlineData": {
+                            "mimeType": media_type,
+                            "data": b64,
+                        }
+                    }))
+                } else {
+                    audio.url.as_ref().map(|url| {
+                        let media_type = audio.media_type.as_deref().unwrap_or("audio/mpeg");
+                        serde_json::json!({
+                            "fileData": {
+                                "mimeType": media_type,
+                                "fileUri": url,
+                            }
+                        })
+                    })
+                }
+            }
+            ContentPart::Document { document } => {
+                if let Some(ref data) = document.data {
+                    let b64 = crate::util::image::base64_encode(data);
+                    let media_type = document.media_type.as_deref().unwrap_or("application/pdf");
+                    Some(serde_json::json!({
+                        "inlineData": {
+                            "mimeType": media_type,
+                            "data": b64,
+                        }
+                    }))
+                } else {
+                    document.url.as_ref().map(|url| {
+                        let media_type =
+                            document.media_type.as_deref().unwrap_or("application/pdf");
+                        serde_json::json!({
+                            "fileData": {
+                                "mimeType": media_type,
+                                "fileUri": url,
+                            }
+                        })
+                    })
+                }
+            }
             ContentPart::Thinking { thinking } => {
                 let mut part = serde_json::json!({
                     "thought": true,
@@ -902,12 +947,21 @@ pub(crate) fn parse_response(
                     continue;
                 }
 
-                // LOW-1: Unrecognized parts (e.g. executableCode, codeExecutionResult)
-                // are logged rather than silently dropped. Matches streaming behavior (M-1).
+                // M-4: Unrecognized parts (e.g. executableCode, codeExecutionResult)
+                // are preserved as ContentPart::Unknown, matching streaming behavior (M-1).
+                let kind = part
+                    .as_object()
+                    .and_then(|obj| obj.keys().next())
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
                 tracing::debug!(
-                    "Gemini non-streaming: unrecognized content part, preserving in raw: {:?}",
-                    part
+                    "Gemini non-streaming: unrecognized content part kind={}, preserving as Unknown",
+                    kind
                 );
+                content_parts.push(ContentPart::Unknown {
+                    kind,
+                    data: part.clone(),
+                });
             }
         }
     }

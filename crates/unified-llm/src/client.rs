@@ -112,9 +112,9 @@ impl Client {
 
     /// Auto-register providers whose API keys are found in environment variables.
     ///
-    /// **Registration order** (first registered becomes default):
-    /// 1. `ANTHROPIC_API_KEY` → Anthropic adapter
-    /// 2. `OPENAI_API_KEY` → OpenAI adapter
+    /// **Registration order** (first registered becomes default, per spec §2.2):
+    /// 1. `OPENAI_API_KEY` → OpenAI adapter
+    /// 2. `ANTHROPIC_API_KEY` → Anthropic adapter
     /// 3. `GEMINI_API_KEY` (fallback: `GOOGLE_API_KEY`) → Gemini adapter
     ///
     /// **Timeout configuration** (optional, shared across all adapters):
@@ -130,23 +130,6 @@ impl Client {
     pub fn from_env() -> Result<Self, Error> {
         let mut builder = ClientBuilder::new();
         let timeout = Self::timeout_from_env();
-
-        #[cfg(feature = "anthropic")]
-        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-            let adapter = if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
-                crate::providers::anthropic::AnthropicAdapter::new_with_base_url_and_timeout(
-                    secrecy::SecretString::from(key),
-                    base_url,
-                    timeout.clone(),
-                )
-            } else {
-                crate::providers::anthropic::AnthropicAdapter::new_with_timeout(
-                    secrecy::SecretString::from(key),
-                    timeout.clone(),
-                )
-            };
-            builder = builder.provider("anthropic", Box::new(adapter));
-        }
 
         #[cfg(feature = "openai")]
         if let Ok(key) = std::env::var("OPENAI_API_KEY") {
@@ -176,6 +159,23 @@ impl Client {
                 adapter_builder = adapter_builder.default_headers(headers);
             }
             builder = builder.provider("openai", Box::new(adapter_builder.build()));
+        }
+
+        #[cfg(feature = "anthropic")]
+        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+            let adapter = if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
+                crate::providers::anthropic::AnthropicAdapter::new_with_base_url_and_timeout(
+                    secrecy::SecretString::from(key),
+                    base_url,
+                    timeout.clone(),
+                )
+            } else {
+                crate::providers::anthropic::AnthropicAdapter::new_with_timeout(
+                    secrecy::SecretString::from(key),
+                    timeout.clone(),
+                )
+            };
+            builder = builder.provider("anthropic", Box::new(adapter));
         }
 
         #[cfg(feature = "gemini")]

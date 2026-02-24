@@ -230,6 +230,8 @@ pub fn stream<'a>(options: GenerateOptions, client: &'a Client) -> Result<Stream
                         // total attempts never exceed max_retries + 1.
                         if !events_yielded && e.retryable && retries_remaining > 0 {
                             retries_remaining -= 1;
+                            // L-21: Backoff delay before retry to prevent rapid-fire retries
+                            tokio::time::sleep(Duration::from_millis(500)).await;
                             // Re-create the stream for this step
                             match client.stream(request.clone()) {
                                 Ok(new_stream) => {
@@ -299,6 +301,7 @@ pub fn stream<'a>(options: GenerateOptions, client: &'a Client) -> Result<Stream
                 &conversation,
                 &abort_signal,
                 options.repair_tool_call.as_ref(),
+                options.validate_tool_args,
             )
             .await;
 

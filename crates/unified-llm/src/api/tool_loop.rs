@@ -60,6 +60,7 @@ pub async fn execute_all_tools(
     messages: &[Message],
     abort_signal: &Option<CancellationToken>,
     repair_fn: Option<&RepairToolCallFn>,
+    validate_args: bool,
 ) -> Vec<ToolResult> {
     let futures: Vec<_> = tool_calls
         .iter()
@@ -82,47 +83,51 @@ pub async fn execute_all_tools(
                             }
                         };
 
-                        // H-6: Validate arguments against schema
-                        let args = match validate_against_schema(&t.definition.parameters, &args) {
-                            Ok(()) => args,
-                            Err(validation_error) => {
-                                // H-7: Try repair if repair_fn is provided
-                                if let Some(repair) = repair_fn {
-                                    if let Some(repaired) = repair(call, &validation_error) {
-                                        // Re-validate the repaired arguments
-                                        match validate_against_schema(
-                                            &t.definition.parameters,
-                                            &repaired,
-                                        ) {
-                                            Ok(()) => repaired,
-                                            Err(e2) => {
-                                                return ToolResult {
-                                                    tool_call_id: call.id.clone(),
-                                                    content: json!(format!(
-                                                        "Repair failed validation: {}",
-                                                        e2
-                                                    )),
-                                                    is_error: true,
-                                                };
+                        // H-6: Validate arguments against schema (gated by validate_args)
+                        let args = if validate_args {
+                            match validate_against_schema(&t.definition.parameters, &args) {
+                                Ok(()) => args,
+                                Err(validation_error) => {
+                                    // H-7: Try repair if repair_fn is provided
+                                    if let Some(repair) = repair_fn {
+                                        if let Some(repaired) = repair(call, &validation_error) {
+                                            // Re-validate the repaired arguments
+                                            match validate_against_schema(
+                                                &t.definition.parameters,
+                                                &repaired,
+                                            ) {
+                                                Ok(()) => repaired,
+                                                Err(e2) => {
+                                                    return ToolResult {
+                                                        tool_call_id: call.id.clone(),
+                                                        content: json!(format!(
+                                                            "Repair failed validation: {}",
+                                                            e2
+                                                        )),
+                                                        is_error: true,
+                                                    };
+                                                }
                                             }
+                                        } else {
+                                            // Repair returned None — propagate original error
+                                            return ToolResult {
+                                                tool_call_id: call.id.clone(),
+                                                content: json!(validation_error),
+                                                is_error: true,
+                                            };
                                         }
                                     } else {
-                                        // Repair returned None — propagate original error
+                                        // No repair fn — return validation error
                                         return ToolResult {
                                             tool_call_id: call.id.clone(),
                                             content: json!(validation_error),
                                             is_error: true,
                                         };
                                     }
-                                } else {
-                                    // No repair fn — return validation error
-                                    return ToolResult {
-                                        tool_call_id: call.id.clone(),
-                                        content: json!(validation_error),
-                                        is_error: true,
-                                    };
                                 }
                             }
+                        } else {
+                            args
                         };
 
                         // H-5: Execute with context if handler supports it, else plain
@@ -281,7 +286,7 @@ mod tests {
         ];
         let call_refs: Vec<&ToolCallData> = calls.iter().collect();
         let start = Instant::now();
-        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None).await;
+        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None, true).await;
         let elapsed = start.elapsed();
         assert_eq!(results.len(), 2);
         assert_eq!(counter.load(Ordering::SeqCst), 2);
@@ -308,7 +313,7 @@ mod tests {
         );
         let calls = vec![make_tool_call("c1", "fail", serde_json::json!({}))];
         let call_refs: Vec<&ToolCallData> = calls.iter().collect();
-        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None).await;
+        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None, true).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].is_error);
         assert_eq!(results[0].tool_call_id, "c1");
@@ -320,7 +325,7 @@ mod tests {
     async fn test_execute_unknown_tool_returns_error() {
         let calls = vec![make_tool_call("c1", "nonexistent", serde_json::json!({}))];
         let call_refs: Vec<&ToolCallData> = calls.iter().collect();
-        let results = execute_all_tools(&[], &call_refs, &[], &None, None).await;
+        let results = execute_all_tools(&[], &call_refs, &[], &None, None, true).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].is_error);
         assert!(results[0].content.to_string().contains("Unknown tool"));
@@ -343,7 +348,7 @@ mod tests {
             serde_json::json!({"key": "value"}),
         )];
         let call_refs: Vec<&ToolCallData> = calls.iter().collect();
-        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None).await;
+        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None, true).await;
         assert!(!results[0].is_error);
         assert_eq!(results[0].content["key"], "value");
     }
@@ -364,7 +369,7 @@ mod tests {
             r#type: "function".into(),
         };
         let call_refs: Vec<&ToolCallData> = vec![&raw_call];
-        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None).await;
+        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None, true).await;
         assert!(!results[0].is_error);
         assert_eq!(results[0].content["raw_key"], "raw_value");
     }
@@ -391,7 +396,7 @@ mod tests {
         ];
         let tools = vec![good_tool, bad_tool];
         let call_refs: Vec<&ToolCallData> = calls.iter().collect();
-        let results = execute_all_tools(&tools, &call_refs, &[], &None, None).await;
+        let results = execute_all_tools(&tools, &call_refs, &[], &None, None, true).await;
         assert_eq!(results.len(), 2);
         assert!(!results[0].is_error);
         assert!(results[1].is_error);
@@ -428,7 +433,7 @@ mod tests {
         };
 
         let call_refs: Vec<&ToolCallData> = vec![&bad_call];
-        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None).await;
+        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None, true).await;
 
         assert_eq!(results.len(), 1);
         assert!(
@@ -463,7 +468,7 @@ mod tests {
             serde_json::json!({"city": "Paris"}),
         );
         let call_refs: Vec<&ToolCallData> = vec![&good_call];
-        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None).await;
+        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None, true).await;
 
         assert_eq!(results.len(), 1);
         assert!(
@@ -512,7 +517,8 @@ mod tests {
         );
 
         let call_refs: Vec<&ToolCallData> = vec![&bad_call];
-        let results = execute_all_tools(&[tool], &call_refs, &[], &None, Some(&repair_fn)).await;
+        let results =
+            execute_all_tools(&[tool], &call_refs, &[], &None, Some(&repair_fn), true).await;
 
         assert_eq!(results.len(), 1);
         assert!(
@@ -549,7 +555,8 @@ mod tests {
         );
 
         let call_refs: Vec<&ToolCallData> = vec![&bad_call];
-        let results = execute_all_tools(&[tool], &call_refs, &[], &None, Some(&repair_fn)).await;
+        let results =
+            execute_all_tools(&[tool], &call_refs, &[], &None, Some(&repair_fn), true).await;
 
         assert_eq!(results.len(), 1);
         assert!(
@@ -584,7 +591,7 @@ mod tests {
         let call_refs: Vec<&ToolCallData> = calls.iter().collect();
         let messages = vec![Message::user("hello")];
 
-        execute_all_tools(&[tool], &call_refs, &messages, &None, None).await;
+        execute_all_tools(&[tool], &call_refs, &messages, &None, None, true).await;
 
         let ctx = received_context.lock().unwrap();
         assert!(ctx.is_some(), "Tool handler should receive ToolContext");
@@ -617,7 +624,7 @@ mod tests {
         ];
         let tools = vec![active_tool, passive_tool];
         let call_refs: Vec<&ToolCallData> = calls.iter().collect();
-        let results = execute_all_tools(&tools, &call_refs, &[], &None, None).await;
+        let results = execute_all_tools(&tools, &call_refs, &[], &None, None, true).await;
 
         // M-8: All 3 results must be present and in order
         assert_eq!(
@@ -674,7 +681,7 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        let results = execute_all_tools(&[tool], &call_refs, &[], &abort_signal, None).await;
+        let results = execute_all_tools(&[tool], &call_refs, &[], &abort_signal, None, true).await;
         let elapsed = start.elapsed();
 
         assert_eq!(results.len(), 1);
@@ -705,7 +712,7 @@ mod tests {
 
         let calls = vec![make_tool_call("c1", "fast", serde_json::json!({}))];
         let call_refs: Vec<&ToolCallData> = calls.iter().collect();
-        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None).await;
+        let results = execute_all_tools(&[tool], &call_refs, &[], &None, None, true).await;
 
         assert_eq!(results.len(), 1);
         assert!(!results[0].is_error);
@@ -735,7 +742,7 @@ mod tests {
         // Cancel immediately
         token.cancel();
 
-        let results = execute_all_tools(&[tool], &call_refs, &[], &abort_signal, None).await;
+        let results = execute_all_tools(&[tool], &call_refs, &[], &abort_signal, None, true).await;
 
         assert_eq!(results.len(), 1);
         assert!(

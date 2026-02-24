@@ -163,6 +163,7 @@ async fn generate_inner(
                 &conversation,
                 &options.abort_signal,
                 repair_fn,
+                options.validate_tool_args,
             )
             .await
         } else {
@@ -350,15 +351,17 @@ pub(crate) fn build_step_result(response: &Response, tool_results: Vec<ToolResul
             .tool_calls()
             .into_iter()
             .map(|tc| {
-                let arguments = match &tc.arguments {
-                    ArgumentValue::Dict(m) => m.clone(),
-                    ArgumentValue::Raw(s) => serde_json::from_str(s).unwrap_or_default(),
+                let (arguments, raw_arguments) = match &tc.arguments {
+                    ArgumentValue::Dict(m) => (m.clone(), None),
+                    ArgumentValue::Raw(s) => {
+                        (serde_json::from_str(s).unwrap_or_default(), Some(s.clone()))
+                    }
                 };
                 ToolCall {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
                     arguments,
-                    raw_arguments: None,
+                    raw_arguments,
                 }
             })
             .collect(),
