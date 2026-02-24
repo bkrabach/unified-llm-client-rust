@@ -119,33 +119,30 @@ impl GeminiAdapter {
     }
 
     /// Build common HTTP headers for Gemini API requests.
-    ///
-    // DEVIATION FROM SPEC: Spec §7 suggests query parameter authentication for Gemini.
-    // We use x-goog-api-key header instead — this is Google's recommended approach
-    // and avoids leaking API keys in server access logs, proxy logs, and browser history.
-    // Both methods are supported by the Gemini API.
     fn build_headers(&self) -> Result<reqwest::header::HeaderMap, Error> {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            "x-goog-api-key",
-            self.api_key.expose_secret().parse().map_err(|_| {
-                Error::configuration("Invalid API key: contains non-ASCII or control characters")
-            })?,
-        );
         headers.insert("content-type", "application/json".parse().unwrap());
         Ok(headers)
     }
 
     /// Build the URL for a non-streaming generateContent request.
+    /// Spec §7.8: Gemini uses `key` query parameter for authentication.
     fn build_url(&self, model: &str) -> String {
-        format!("{}/v1beta/models/{}:generateContent", self.base_url, model)
+        format!(
+            "{}/v1beta/models/{}:generateContent?key={}",
+            self.base_url,
+            model,
+            self.api_key.expose_secret()
+        )
     }
 
     /// Build the URL for a streaming generateContent request.
     fn build_stream_url(&self, model: &str) -> String {
         format!(
-            "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
-            self.base_url, model
+            "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
+            self.base_url,
+            model,
+            self.api_key.expose_secret()
         )
     }
 
@@ -1445,38 +1442,49 @@ mod tests {
     }
 
     #[test]
-    fn test_build_headers_has_api_key() {
+    fn test_build_headers_has_content_type() {
         let adapter = GeminiAdapter::new(SecretString::from("test-key-123".to_string()));
         let headers = adapter.build_headers().unwrap();
-        assert_eq!(headers.get("x-goog-api-key").unwrap(), "test-key-123");
+        // Auth is via query param (spec §7.8), not header
+        assert!(headers.get("x-goog-api-key").is_none());
         assert_eq!(headers.get("content-type").unwrap(), "application/json");
     }
 
     #[test]
-    fn test_build_url() {
-        let adapter = GeminiAdapter::new(SecretString::from("k".to_string()));
+    fn test_build_url_includes_api_key() {
+        let adapter = GeminiAdapter::new(SecretString::from("test-key-123".to_string()));
         let url = adapter.build_url("gemini-2.0-flash");
+        assert!(
+            url.contains("key=test-key-123"),
+            "URL should contain API key as query param"
+        );
         assert_eq!(
             url,
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=test-key-123"
         );
     }
 
     #[test]
-    fn test_build_stream_url() {
+    fn test_build_stream_url_includes_api_key() {
         let adapter = GeminiAdapter::new(SecretString::from("k".to_string()));
         let url = adapter.build_stream_url("gemini-2.0-flash");
         assert_eq!(
             url,
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse"
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key=k"
         );
     }
 
     #[test]
-    fn test_build_headers_rejects_invalid_key() {
-        let adapter = GeminiAdapter::new(SecretString::from("bad\x00key".to_string()));
+    fn test_build_headers_content_type_only() {
+        // Auth is via query param now, so headers should NOT reject keys —
+        // they only carry content-type.
+        let adapter = GeminiAdapter::new(SecretString::from("any-key".to_string()));
         let result = adapter.build_headers();
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap().get("content-type").unwrap(),
+            "application/json"
+        );
     }
 
     // === T02: Request translation — messages and system ===
@@ -2519,7 +2527,7 @@ mod tests {
             .and(wiremock::matchers::path_regex(
                 r"/v1beta/models/.+:generateContent",
             ))
-            .and(wiremock::matchers::header_exists("x-goog-api-key"))
+            // Auth is via ?key= query param (spec §7.8) — verified in dedicated test
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "responseId": "resp_test",
@@ -2627,17 +2635,13 @@ mod tests {
             .path()
             .contains("gemini-2.0-flash:generateContent"));
 
-        // Verify x-goog-api-key header (NOT in URL)
-        assert_eq!(
-            requests[0]
-                .headers
-                .get("x-goog-api-key")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "test-key"
+        // Verify API key is in URL query param (spec §7.8), not header
+        let url_str = requests[0].url.to_string();
+        assert!(
+            url_str.contains("key=test-key"),
+            "API key should be in URL query param, got: {}",
+            url_str
         );
-        assert!(!requests[0].url.to_string().contains("test-key"));
 
         // Verify body structure
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();

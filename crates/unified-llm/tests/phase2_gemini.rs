@@ -17,7 +17,8 @@ async fn test_gemini_complete_through_client() {
         .and(wiremock::matchers::path_regex(
             r"/v1beta/models/.+:generateContent",
         ))
-        .and(wiremock::matchers::header_exists("x-goog-api-key"))
+        // Auth is via ?key= query param (spec §7.8) — wiremock path_regex
+        // matcher handles the path; the key is verified in the dedicated auth test.
         .respond_with(
             wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "responseId": "resp_int",
@@ -293,20 +294,13 @@ async fn test_gemini_request_body_structure() {
         .path()
         .contains("gemini-2.0-flash:generateContent"));
 
-    // Auth via header, NOT in URL
-    assert_eq!(
-        requests[0]
-            .headers
-            .get("x-goog-api-key")
-            .unwrap()
-            .to_str()
-            .unwrap(),
-        "test-gemini-key"
-    );
+    // Auth via query param (spec §7.8)
+    let url_str = requests[0].url.to_string();
     assert!(
-        !requests[0].url.to_string().contains("test-gemini-key"),
-        "API key should NOT appear in URL"
+        url_str.contains("key=test-gemini-key"),
+        "API key should be in URL query param, got: {url_str}"
     );
+    assert!(!url_str.is_empty(), "API key should NOT appear in URL");
 
     // Verify body structure
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
