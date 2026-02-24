@@ -404,6 +404,11 @@ impl AnthropicAdapter {
                     }
                 }
             }
+
+            // Emit TextEnd/ReasoningEnd/ToolCallEnd and Finish if stream ended without message_stop
+            for evt in translator.finalize() {
+                yield Ok(evt);
+            }
         };
         Box::pin(stream)
     }
@@ -425,6 +430,10 @@ struct StreamTranslator {
     cache_write_tokens: Option<u32>,
     thinking_text_length: usize,
     active_thinking_signature: Option<String>,
+    /// S-1: text_id generated on TextStart, propagated to TextDelta/TextEnd.
+    current_text_id: Option<String>,
+    /// Set when message_stop is received.
+    finished: bool,
 }
 
 impl StreamTranslator {
@@ -444,6 +453,8 @@ impl StreamTranslator {
             cache_write_tokens: None,
             thinking_text_length: 0,
             active_thinking_signature: None,
+            current_text_id: None,
+            finished: false,
         }
     }
 
@@ -495,9 +506,11 @@ impl StreamTranslator {
                     self.active_block_type = Some(block_type.to_string());
                     match block_type {
                         "text" => {
+                            let text_id = format!("txt_{}", uuid::Uuid::new_v4());
+                            self.current_text_id = Some(text_id.clone());
                             events.push(StreamEvent {
                                 event_type: StreamEventType::TextStart,
-                                text_id: block_idx.map(|i| i.to_string()),
+                                text_id: Some(text_id),
                                 ..Default::default()
                             });
                         }
@@ -570,7 +583,7 @@ impl StreamTranslator {
                             events.push(StreamEvent {
                                 event_type: StreamEventType::TextDelta,
                                 delta: Some(text),
-                                text_id: self.active_block_index.map(|i| i.to_string()),
+                                text_id: self.current_text_id.clone(),
                                 ..Default::default()
                             });
                         }
@@ -624,7 +637,7 @@ impl StreamTranslator {
                     Some("text") => {
                         events.push(StreamEvent {
                             event_type: StreamEventType::TextEnd,
-                            text_id: self.active_block_index.map(|i| i.to_string()),
+                            text_id: self.current_text_id.take(),
                             ..Default::default()
                         });
                     }
@@ -701,6 +714,7 @@ impl StreamTranslator {
                 }
             }
             "message_stop" => {
+                self.finished = true;
                 let finish_reason = self
                     .stop_reason
                     .as_deref()
@@ -783,6 +797,68 @@ impl StreamTranslator {
             }
         }
 
+        events
+    }
+
+    /// Called when the stream connection closes — emit final events if not already finished.
+    fn finalize(&mut self) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
+        if !self.finished {
+            // Close any active content block
+            match self.active_block_type.as_deref() {
+                Some("text") => {
+                    events.push(StreamEvent {
+                        event_type: StreamEventType::TextEnd,
+                        text_id: self.active_block_index.map(|i| i.to_string()),
+                        ..Default::default()
+                    });
+                }
+                Some("thinking") => {
+                    events.push(StreamEvent {
+                        event_type: StreamEventType::ReasoningEnd,
+                        raw: self
+                            .active_thinking_signature
+                            .take()
+                            .map(|sig| serde_json::json!({"signature": sig})),
+                        ..Default::default()
+                    });
+                }
+                Some("tool_use") => {
+                    let tool_call = if self.active_tool_id.is_some()
+                        || self.active_tool_name.is_some()
+                    {
+                        let id = self.active_tool_id.take().unwrap_or_default();
+                        let name = self.active_tool_name.take().unwrap_or_default();
+                        let arguments: serde_json::Map<String, serde_json::Value> =
+                            serde_json::from_str(&self.accumulated_tool_json).unwrap_or_default();
+                        let raw_arguments = if self.accumulated_tool_json.is_empty() {
+                            None
+                        } else {
+                            Some(self.accumulated_tool_json.clone())
+                        };
+                        Some(ToolCall {
+                            id,
+                            name,
+                            arguments,
+                            raw_arguments,
+                        })
+                    } else {
+                        None
+                    };
+                    events.push(StreamEvent {
+                        event_type: StreamEventType::ToolCallEnd,
+                        tool_call,
+                        ..Default::default()
+                    });
+                }
+                _ => {}
+            }
+            events.push(StreamEvent {
+                event_type: StreamEventType::Finish,
+                finish_reason: Some(FinishReason::stop()),
+                ..Default::default()
+            });
+        }
         events
     }
 }
@@ -960,6 +1036,10 @@ pub(crate) fn translate_request(
     // - json_object: always system prompt injection
     if let Some(ref response_format) = request.response_format {
         if response_format.r#type == "json_schema" && !use_tool_based_extraction {
+            tracing::warn!(
+                "Anthropic structured output falling back to system-prompt injection \
+                 (tool-based extraction unavailable because user tools or tool_choice are set)"
+            );
             // Fallback: inject schema into system prompt when tools/tool_choice conflict
             if let Some(ref schema) = response_format.json_schema {
                 let schema_instruction = format!(

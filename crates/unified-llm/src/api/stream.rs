@@ -230,8 +230,14 @@ pub fn stream<'a>(options: GenerateOptions, client: &'a Client) -> Result<Stream
                         // total attempts never exceed max_retries + 1.
                         if !events_yielded && e.retryable && retries_remaining > 0 {
                             retries_remaining -= 1;
-                            // L-21: Backoff delay before retry to prevent rapid-fire retries
-                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            // L-3: Use exponential backoff for stream first-read retry
+                            let backoff_attempt = max_retries - retries_remaining - 1;
+                            let delay = crate::util::retry::calculate_delay(
+                                &retry_policy,
+                                backoff_attempt,
+                                e.retry_after,
+                            );
+                            tokio::time::sleep(delay).await;
                             // Re-create the stream for this step
                             match client.stream(request.clone()) {
                                 Ok(new_stream) => {
@@ -1435,7 +1441,7 @@ mod tests {
             });
         // Extract the error before the StreamResult borrow of `client` is dropped.
         let err = stream(opts, &client).map(|_| ()).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::UnsupportedToolChoice);
+        assert_eq!(err.kind, ErrorKind::InvalidRequest);
         assert!(
             err.message.contains("bogus_mode"),
             "Error should mention the invalid mode, got: {}",

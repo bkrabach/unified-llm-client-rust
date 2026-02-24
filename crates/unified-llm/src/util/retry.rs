@@ -103,8 +103,6 @@ pub(crate) fn calculate_delay(
         delay_secs
     };
 
-    let delay_secs = delay_secs.min(policy.max_delay); // re-clamp after jitter
-
     Duration::from_secs_f64(delay_secs)
 }
 
@@ -394,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_delay_with_jitter_never_exceeds_max_delay() {
+    fn test_calculate_delay_with_jitter_may_slightly_exceed_max_delay() {
         let policy = RetryPolicy {
             max_retries: 10,
             base_delay: 10.0,
@@ -403,13 +401,20 @@ mod tests {
             jitter: true,
             on_retry: None,
         };
-        // Run 100 iterations — with jitter range [0.5, 1.5], the pre-fix code
-        // will produce values up to 15.0 (10.0 * 1.5), exceeding max_delay.
+        // Spec says jitter should be able to exceed max_delay slightly.
+        // With jitter range [0.5, 1.5], delay can be up to 15.0s (10.0 * 1.5).
+        // Verify delays stay within the theoretical jitter bounds.
         for attempt in 0..100 {
             let delay = calculate_delay(&policy, attempt % 5, None);
             assert!(
-                delay <= Duration::from_secs_f64(10.0),
-                "Delay {:?} exceeded max_delay of 10.0s on attempt {}",
+                delay <= Duration::from_secs_f64(15.0),
+                "Delay {:?} exceeded theoretical max of 15.0s on attempt {}",
+                delay,
+                attempt
+            );
+            assert!(
+                delay >= Duration::from_secs_f64(0.5),
+                "Delay {:?} below theoretical min on attempt {}",
                 delay,
                 attempt
             );

@@ -25,9 +25,6 @@ pub enum ErrorKind {
     Stream,
     InvalidToolCall,
     NoObjectGenerated,
-    /// L-3: Implementation extension beyond the spec's 16-type hierarchy.
-    /// Maps semantically to InvalidRequest but kept separate for precise error handling.
-    UnsupportedToolChoice,
     Configuration,
 }
 
@@ -169,7 +166,7 @@ impl Error {
     /// Convenience: unsupported tool choice mode error.
     pub fn unsupported_tool_choice(mode: &str) -> Self {
         Self {
-            kind: ErrorKind::UnsupportedToolChoice,
+            kind: ErrorKind::InvalidRequest,
             message: format!("Unsupported tool choice mode: '{mode}'"),
             retryable: false,
             source: None,
@@ -292,7 +289,7 @@ mod tests {
     // --- ErrorKind variant existence ---
 
     #[test]
-    fn test_all_17_error_kinds_exist() {
+    fn test_all_16_error_kinds_exist() {
         let kinds = vec![
             ErrorKind::Authentication,
             ErrorKind::AccessDenied,
@@ -309,10 +306,9 @@ mod tests {
             ErrorKind::Stream,
             ErrorKind::InvalidToolCall,
             ErrorKind::NoObjectGenerated,
-            ErrorKind::UnsupportedToolChoice,
             ErrorKind::Configuration,
         ];
-        assert_eq!(kinds.len(), 17);
+        assert_eq!(kinds.len(), 16);
     }
 
     // --- from_http_status mapping ---

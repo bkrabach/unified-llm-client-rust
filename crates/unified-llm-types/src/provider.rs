@@ -41,11 +41,6 @@ pub trait ProviderAdapter: Send + Sync {
     fn initialize(&self) -> BoxFuture<'_, Result<(), Error>> {
         Box::pin(async { Ok(()) })
     }
-
-    /// Query whether a particular tool choice mode is supported.
-    fn supports_tool_choice(&self, _mode: &str) -> bool {
-        true
-    }
 }
 
 #[cfg(test)]
@@ -88,14 +83,6 @@ mod tests {
     fn test_provider_adapter_trait_object() {
         let adapter: Box<dyn ProviderAdapter> = Box::new(TestAdapter);
         assert_eq!(adapter.name(), "test");
-    }
-
-    #[test]
-    fn test_provider_adapter_supports_tool_choice_default() {
-        let adapter = TestAdapter;
-        assert!(adapter.supports_tool_choice("auto"));
-        assert!(adapter.supports_tool_choice("none"));
-        assert!(adapter.supports_tool_choice("required"));
     }
 
     #[tokio::test]

@@ -1830,6 +1830,7 @@ name = "unified-llm-types"
 version = "0.1.0"
 dependencies = [
  "futures-core",
+ "httpdate",
  "serde",
  "serde_json",
  "tokio",

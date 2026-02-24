@@ -68,7 +68,7 @@ const VALID_TOOL_CHOICE_MODES: &[&str] = &["auto", "none", "required", "named"];
 
 impl ToolChoice {
     /// Validate that the tool choice mode is a recognized value.
-    /// Returns `Err(UnsupportedToolChoice)` for unknown modes.
+    /// Returns `Err(InvalidRequest)` for unknown modes.
     pub fn validate(&self) -> Result<(), crate::error::Error> {
         if !VALID_TOOL_CHOICE_MODES.contains(&self.mode.as_str()) {
             return Err(crate::error::Error::unsupported_tool_choice(&self.mode));
@@ -278,7 +278,7 @@ mod tests {
             tool_name: None,
         };
         let err = tc.validate().unwrap_err();
-        assert_eq!(err.kind, crate::error::ErrorKind::UnsupportedToolChoice);
+        assert_eq!(err.kind, crate::error::ErrorKind::InvalidRequest);
         assert!(err.message.contains("invalid_mode"));
     }
 

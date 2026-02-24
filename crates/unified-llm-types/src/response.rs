@@ -196,6 +196,18 @@ pub struct RateLimitInfo {
     pub reset_at: Option<String>, // ISO 8601 timestamp
 }
 
+impl RateLimitInfo {
+    /// Attempt to parse the `reset_at` field into a `SystemTime`.
+    ///
+    /// Uses the `httpdate` crate to parse HTTP-date formatted strings.
+    /// Returns `None` if `reset_at` is `None` or parsing fails.
+    pub fn reset_at_parsed(&self) -> Option<std::time::SystemTime> {
+        self.reset_at
+            .as_deref()
+            .and_then(|s| httpdate::parse_http_date(s).ok())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +420,40 @@ mod tests {
         let r = RateLimitInfo::default();
         assert!(r.requests_remaining.is_none());
         assert!(r.tokens_limit.is_none());
+    }
+
+    #[test]
+    fn test_rate_limit_info_reset_at_parsed_valid() {
+        let r = RateLimitInfo {
+            reset_at: Some("Sun, 06 Nov 1994 08:49:37 GMT".into()),
+            ..Default::default()
+        };
+        let parsed = r.reset_at_parsed();
+        assert!(
+            parsed.is_some(),
+            "Valid HTTP date should parse successfully"
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_info_reset_at_parsed_invalid() {
+        let r = RateLimitInfo {
+            reset_at: Some("not-a-date".into()),
+            ..Default::default()
+        };
+        assert!(
+            r.reset_at_parsed().is_none(),
+            "Invalid date should return None"
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_info_reset_at_parsed_none() {
+        let r = RateLimitInfo::default();
+        assert!(
+            r.reset_at_parsed().is_none(),
+            "None reset_at should return None"
+        );
     }
 
     #[test]

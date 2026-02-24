@@ -1225,7 +1225,7 @@ mod tests {
                 tool_name: None,
             });
         let err = generate(opts, &client).await.unwrap_err();
-        assert_eq!(err.kind, ErrorKind::UnsupportedToolChoice);
+        assert_eq!(err.kind, ErrorKind::InvalidRequest);
         assert!(
             err.message.contains("invalid_mode"),
             "Error should mention the invalid mode, got: {}",

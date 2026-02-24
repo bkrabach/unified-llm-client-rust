@@ -197,6 +197,30 @@ mod tests {
                 Ok(response)
             })
         }
+
+        fn process_stream<'a>(
+            &'a self,
+            request: Request,
+            next: Next<'a>,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<StreamEvent, Error>>, Error>> {
+            let id = self.id;
+            let log = self.log.clone();
+            Box::pin(async move {
+                log.lock().unwrap().push(format!("{id}:request"));
+                let inner_stream = next.run_stream(request).await?;
+                let log_clone = log.clone();
+                let wrapped: BoxStream<'a, Result<StreamEvent, Error>> =
+                    Box::pin(async_stream::stream! {
+                        use futures::StreamExt;
+                        let mut inner = inner_stream;
+                        while let Some(event) = inner.next().await {
+                            yield event;
+                        }
+                        log_clone.lock().unwrap().push(format!("{id}:response"));
+                    });
+                Ok(wrapped)
+            })
+        }
     }
 
     // --- Test middleware: modifies request and response ---
@@ -425,6 +449,125 @@ mod tests {
         // Verify LoggingMiddleware can be used as Arc<dyn Middleware>
         let mw: Arc<dyn Middleware> = Arc::new(LoggingMiddleware);
         let _ = mw; // compiles = pass
+    }
+
+    // --- L-9: Streaming middleware onion order tests ---
+
+    #[tokio::test]
+    async fn test_middleware_stream_onion_order_two_middlewares() {
+        use futures::StreamExt;
+
+        // [A, B] => A:request, B:request, B:response, A:response
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let mw_a = Arc::new(OrderRecordingMiddleware {
+            id: "A",
+            log: log.clone(),
+        });
+        let mw_b = Arc::new(OrderRecordingMiddleware {
+            id: "B",
+            log: log.clone(),
+        });
+
+        let mock = MockProvider::new("test").with_stream_events(vec![
+            StreamEvent {
+                event_type: StreamEventType::StreamStart,
+                ..Default::default()
+            },
+            StreamEvent {
+                event_type: StreamEventType::TextDelta,
+                delta: Some("hi".into()),
+                ..Default::default()
+            },
+            StreamEvent {
+                event_type: StreamEventType::Finish,
+                ..Default::default()
+            },
+        ]);
+        let client = Client::builder()
+            .provider("test", Box::new(mock))
+            .middleware(mw_a)
+            .middleware(mw_b)
+            .build()
+            .unwrap();
+
+        let request = Request {
+            model: "m".into(),
+            messages: vec![Message::user("Hi")],
+            ..Default::default()
+        };
+        let event_stream = client.stream(request).unwrap();
+        // Consume the entire stream to trigger response-phase logging
+        let _events: Vec<_> = event_stream.collect::<Vec<_>>().await;
+
+        let entries = log.lock().unwrap().clone();
+        assert_eq!(
+            entries,
+            vec!["A:request", "B:request", "B:response", "A:response"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_middleware_stream_onion_order_three_middlewares() {
+        use futures::StreamExt;
+
+        // [A, B, C] => A:req, B:req, C:req, C:res, B:res, A:res
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let mw_a = Arc::new(OrderRecordingMiddleware {
+            id: "A",
+            log: log.clone(),
+        });
+        let mw_b = Arc::new(OrderRecordingMiddleware {
+            id: "B",
+            log: log.clone(),
+        });
+        let mw_c = Arc::new(OrderRecordingMiddleware {
+            id: "C",
+            log: log.clone(),
+        });
+
+        let mock = MockProvider::new("test").with_stream_events(vec![
+            StreamEvent {
+                event_type: StreamEventType::StreamStart,
+                ..Default::default()
+            },
+            StreamEvent {
+                event_type: StreamEventType::TextDelta,
+                delta: Some("hi".into()),
+                ..Default::default()
+            },
+            StreamEvent {
+                event_type: StreamEventType::Finish,
+                ..Default::default()
+            },
+        ]);
+        let client = Client::builder()
+            .provider("test", Box::new(mock))
+            .middleware(mw_a)
+            .middleware(mw_b)
+            .middleware(mw_c)
+            .build()
+            .unwrap();
+
+        let request = Request {
+            model: "m".into(),
+            messages: vec![Message::user("Hi")],
+            ..Default::default()
+        };
+        let event_stream = client.stream(request).unwrap();
+        let _events: Vec<_> = event_stream.collect::<Vec<_>>().await;
+
+        let entries = log.lock().unwrap().clone();
+        assert_eq!(
+            entries,
+            vec![
+                "A:request",
+                "B:request",
+                "C:request",
+                "C:response",
+                "B:response",
+                "A:response"
+            ]
+        );
     }
 
     #[tokio::test]

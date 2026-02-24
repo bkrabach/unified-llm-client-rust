@@ -282,6 +282,11 @@ impl OpenAiAdapter {
                     }
                 }
             }
+
+            // Emit TextEnd and Finish if stream ended without response.completed
+            for evt in translator.finalize() {
+                yield Ok(evt);
+            }
         };
         Box::pin(stream)
     }
@@ -893,6 +898,8 @@ struct OpenAiStreamTranslator {
     active_tool_name: Option<String>,
     accumulated_tool_json: String,
     reasoning_started: bool,
+    /// Set when response.completed or response.failed is received.
+    finished: bool,
 }
 
 impl OpenAiStreamTranslator {
@@ -906,6 +913,7 @@ impl OpenAiStreamTranslator {
             active_tool_name: None,
             accumulated_tool_json: String::new(),
             reasoning_started: false,
+            finished: false,
         }
     }
 
@@ -1101,6 +1109,7 @@ impl OpenAiStreamTranslator {
             }
 
             "response.completed" => {
+                self.finished = true;
                 // Real API nests under "response" key; fall back to flat for compat
                 let response_data = data.get("response").unwrap_or(data);
                 // Parse usage from the final response object
@@ -1165,6 +1174,7 @@ impl OpenAiStreamTranslator {
             }
 
             "response.failed" => {
+                self.finished = true;
                 // Real API nests under "response" key; fall back to flat for compat
                 let response_data = data.get("response").unwrap_or(data);
                 let error_msg = response_data
@@ -1197,6 +1207,32 @@ impl OpenAiStreamTranslator {
             }
         }
 
+        events
+    }
+
+    /// Called when the stream connection closes — emit final events if not already finished.
+    fn finalize(&mut self) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
+        if !self.finished {
+            if self.reasoning_started {
+                events.push(StreamEvent {
+                    event_type: StreamEventType::ReasoningEnd,
+                    ..Default::default()
+                });
+            }
+            if self.text_started {
+                events.push(StreamEvent {
+                    event_type: StreamEventType::TextEnd,
+                    text_id: self.current_text_id.take(),
+                    ..Default::default()
+                });
+            }
+            events.push(StreamEvent {
+                event_type: StreamEventType::Finish,
+                finish_reason: Some(FinishReason::stop()),
+                ..Default::default()
+            });
+        }
         events
     }
 }

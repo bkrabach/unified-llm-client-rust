@@ -574,6 +574,10 @@ pub(crate) fn translate_request(
     // Structured output: response_format → responseMimeType + responseSchema
     if let Some(ref fmt) = request.response_format {
         if fmt.r#type == "json_schema" {
+            // L-7: Warn when strict=true since Gemini does not support strict schema enforcement
+            if fmt.strict {
+                tracing::warn!("Gemini does not support strict schema enforcement; strict=true will be ignored");
+            }
             gen_config.insert(
                 "responseMimeType".into(),
                 serde_json::Value::String("application/json".to_string()),
@@ -581,6 +585,11 @@ pub(crate) fn translate_request(
             if let Some(ref schema) = fmt.json_schema {
                 gen_config.insert("responseSchema".into(), schema.clone());
             }
+        } else if fmt.r#type == "json_object" {
+            gen_config.insert(
+                "responseMimeType".into(),
+                serde_json::json!("application/json"),
+            );
         }
     }
 
@@ -1116,6 +1125,40 @@ impl GeminiStreamTranslator {
     fn process(&mut self, data: &serde_json::Value) -> Vec<StreamEvent> {
         let mut events = Vec::new();
 
+        // L-6: Check for error keys in the parsed JSON before processing candidates
+        if let Some(error) = data.get("error") {
+            let error_msg = error
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown Gemini streaming error");
+            let error_code = error.get("code").and_then(|v| v.as_u64()).unwrap_or(500) as u16;
+            let error_status = error
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            tracing::error!(
+                "Gemini stream error: code={}, status={:?}, message={}",
+                error_code,
+                error_status,
+                error_msg
+            );
+            let provider_error = Error::from_http_status(
+                error_code,
+                format!("Gemini streaming error: {}", error_msg),
+                "gemini",
+                Some(data.clone()),
+                None,
+            );
+            events.push(StreamEvent {
+                event_type: StreamEventType::Error,
+                error: Some(Box::new(unified_llm_types::StreamError::from_error(
+                    &provider_error,
+                ))),
+                ..Default::default()
+            });
+            return events;
+        }
+
         // Emit StreamStart on first chunk
         if !self.started {
             self.started = true;
@@ -1209,12 +1252,19 @@ impl GeminiStreamTranslator {
                         id: call_id,
                         name,
                         arguments: args,
-                        raw_arguments: raw_args,
+                        raw_arguments: raw_args.clone(),
                     };
 
                     events.push(StreamEvent {
                         event_type: StreamEventType::ToolCallStart,
                         tool_call: Some(tool_call.clone()),
+                        ..Default::default()
+                    });
+                    // L-5: Emit synthetic ToolCallDelta carrying the full arguments
+                    events.push(StreamEvent {
+                        event_type: StreamEventType::ToolCallDelta,
+                        tool_call: Some(tool_call.clone()),
+                        delta: raw_args,
                         ..Default::default()
                     });
                     events.push(StreamEvent {
