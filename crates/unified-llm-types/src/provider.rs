@@ -41,6 +41,12 @@ pub trait ProviderAdapter: Send + Sync {
     fn initialize(&self) -> BoxFuture<'_, Result<(), Error>> {
         Box::pin(async { Ok(()) })
     }
+
+    /// Query whether this provider supports a specific tool choice mode.
+    /// Default returns true for all modes. Override in adapters with caveats.
+    fn supports_tool_choice(&self, _mode: &str) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -107,5 +113,15 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind, crate::error::ErrorKind::Configuration);
+    }
+
+    #[test]
+    fn test_provider_adapter_default_supports_tool_choice() {
+        let adapter = TestAdapter;
+        // Default implementation returns true for all modes
+        assert!(adapter.supports_tool_choice("auto"));
+        assert!(adapter.supports_tool_choice("any"));
+        assert!(adapter.supports_tool_choice("none"));
+        assert!(adapter.supports_tool_choice("tool"));
     }
 }

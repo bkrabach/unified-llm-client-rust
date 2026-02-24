@@ -121,6 +121,33 @@ pub struct Usage {
     pub raw: Option<serde_json::Value>,
 }
 
+impl Usage {
+    /// Estimated cost in USD based on token counts and model pricing.
+    /// Applies cached-token discounts: Anthropic 90% discount on cache_read, OpenAI 50%.
+    pub fn estimated_cost(
+        &self,
+        input_cost_per_million: f64,
+        output_cost_per_million: f64,
+        provider: &str,
+    ) -> f64 {
+        let cache_read = self.cache_read_tokens.unwrap_or(0) as f64;
+        let cache_write = self.cache_write_tokens.unwrap_or(0) as f64;
+        let non_cached_input = (self.input_tokens as f64) - cache_read;
+
+        let cache_discount = match provider {
+            "anthropic" => 0.1, // 90% discount = pay 10%
+            "openai" => 0.5,    // 50% discount
+            _ => 1.0,           // no discount
+        };
+
+        let input_cost = (non_cached_input + cache_read * cache_discount + cache_write * 1.25)
+            * input_cost_per_million
+            / 1_000_000.0;
+        let output_cost = self.output_tokens as f64 * output_cost_per_million / 1_000_000.0;
+        input_cost + output_cost
+    }
+}
+
 fn add_optional(a: Option<u32>, b: Option<u32>) -> Option<u32> {
     match (a, b) {
         (None, None) => None,
@@ -673,5 +700,71 @@ mod tests {
         // Originals are not consumed
         assert_eq!(a.input_tokens, 10);
         assert_eq!(b.input_tokens, 20);
+    }
+
+    // --- F-1: Usage::estimated_cost() ---
+
+    #[test]
+    fn test_estimated_cost_no_cache() {
+        let u = Usage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            total_tokens: 1500,
+            ..Default::default()
+        };
+        // $3/M input, $15/M output, unknown provider (no discount)
+        let cost = u.estimated_cost(3.0, 15.0, "unknown");
+        let expected = 1000.0 * 3.0 / 1_000_000.0 + 500.0 * 15.0 / 1_000_000.0;
+        assert!(
+            (cost - expected).abs() < 1e-10,
+            "no-cache cost: got {cost}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn test_estimated_cost_anthropic_cache_discount() {
+        let u = Usage {
+            input_tokens: 1000, // total input including cache_read
+            output_tokens: 200,
+            total_tokens: 1200,
+            cache_read_tokens: Some(800),
+            cache_write_tokens: Some(100),
+            ..Default::default()
+        };
+        // $3/M input, $15/M output, anthropic (90% discount on cache_read, 1.25x on cache_write)
+        let cost = u.estimated_cost(3.0, 15.0, "anthropic");
+        // non_cached_input = 1000 - 800 = 200
+        // input_cost = (200 + 800*0.1 + 100*1.25) * 3.0 / 1M = (200+80+125) * 3.0/1M = 405*3/1M
+        // output_cost = 200 * 15.0 / 1M
+        let expected_input = (200.0 + 800.0 * 0.1 + 100.0 * 1.25) * 3.0 / 1_000_000.0;
+        let expected_output = 200.0 * 15.0 / 1_000_000.0;
+        let expected = expected_input + expected_output;
+        assert!(
+            (cost - expected).abs() < 1e-10,
+            "anthropic cost: got {cost}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn test_estimated_cost_openai_cache_discount() {
+        let u = Usage {
+            input_tokens: 500,
+            output_tokens: 100,
+            total_tokens: 600,
+            cache_read_tokens: Some(300),
+            ..Default::default()
+        };
+        // $5/M input, $15/M output, openai (50% discount on cache_read)
+        let cost = u.estimated_cost(5.0, 15.0, "openai");
+        // non_cached_input = 500 - 300 = 200
+        // input_cost = (200 + 300*0.5 + 0*1.25) * 5.0 / 1M = 350 * 5.0/1M
+        // output_cost = 100 * 15.0 / 1M
+        let expected_input = (200.0 + 300.0 * 0.5) * 5.0 / 1_000_000.0;
+        let expected_output = 100.0 * 15.0 / 1_000_000.0;
+        let expected = expected_input + expected_output;
+        assert!(
+            (cost - expected).abs() < 1e-10,
+            "openai cost: got {cost}, expected {expected}"
+        );
     }
 }

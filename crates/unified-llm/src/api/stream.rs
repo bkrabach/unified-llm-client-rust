@@ -38,6 +38,13 @@ use super::types::GenerateOptions;
 ///
 /// See also [`stream_with_default`] for a convenience wrapper that uses the
 /// module-level default client and returns a `'static` stream.
+///
+/// NOTE: The spec describes a single `stream()` function with an optional `client` parameter.
+/// In Rust, optional parameters are not idiomatic. This implementation provides two functions:
+/// - `stream(options, &client)` — explicit client
+/// - `stream_with_default(options)` — uses module-level default client
+///
+/// This is a documented Rust-specific deviation from the spec's API shape.
 pub fn stream<'a>(options: GenerateOptions, client: &'a Client) -> Result<StreamResult<'a>, Error> {
     // M-9: Validate tools and tool_choice upfront before any API calls.
     if let Some(ref tools) = options.tools {

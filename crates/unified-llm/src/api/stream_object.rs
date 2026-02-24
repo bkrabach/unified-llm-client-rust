@@ -56,6 +56,13 @@ pub struct StreamObjectResult<'a> {
 /// cannot be parsed or does not validate against the provided schema.
 ///
 /// Spec reference: S4.6
+///
+/// NOTE: The spec describes a single `streamObject()` function with an optional `client` parameter.
+/// In Rust, optional parameters are not idiomatic. This implementation provides two functions:
+/// - `stream_object(options, schema, &client)` — explicit client
+/// - `stream_object_with_default(options, schema)` — uses module-level default client
+///
+/// This is a documented Rust-specific deviation from the spec's API shape.
 pub fn stream_object<'a>(
     mut options: GenerateOptions,
     schema: serde_json::Value,

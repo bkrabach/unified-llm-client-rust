@@ -419,6 +419,57 @@ async fn test_audio_graceful_gemini() {
     verify_unsupported_content_graceful(&ProviderTestHarness::gemini().await).await;
 }
 
+// ----------------------------------------------------------------------------
+// F-4: Document content graceful rejection
+// ----------------------------------------------------------------------------
+
+async fn verify_document_content_graceful(h: &ProviderTestHarness) {
+    mount_ok_response(h).await;
+
+    // Document content part — should be dropped silently, not crash
+    let req = Request::default()
+        .model("test-model")
+        .messages(vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentPart::text("Process this document"),
+                ContentPart::Document {
+                    document: DocumentData {
+                        url: Some("https://example.com/report.pdf".to_string()),
+                        data: None,
+                        media_type: Some("application/pdf".to_string()),
+                        file_name: Some("report.pdf".to_string()),
+                    },
+                },
+            ],
+            name: None,
+            tool_call_id: None,
+        }]);
+
+    // Should not panic or error — the document part is simply dropped
+    let resp = h.client.complete(req).await.unwrap();
+    assert!(
+        !resp.text().is_empty(),
+        "{}: should still get non-empty response even with unsupported document content",
+        h.provider_name
+    );
+}
+
+#[tokio::test]
+async fn test_document_graceful_anthropic() {
+    verify_document_content_graceful(&ProviderTestHarness::anthropic().await).await;
+}
+
+#[tokio::test]
+async fn test_document_graceful_openai() {
+    verify_document_content_graceful(&ProviderTestHarness::openai().await).await;
+}
+
+#[tokio::test]
+async fn test_document_graceful_gemini() {
+    verify_document_content_graceful(&ProviderTestHarness::gemini().await).await;
+}
+
 // ============================================================================
 // DoD 8.3.5: Tool call content parts round-trip correctly
 //

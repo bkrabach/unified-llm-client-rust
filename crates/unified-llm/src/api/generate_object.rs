@@ -20,6 +20,13 @@ use super::types::GenerateOptions;
 /// or does not validate against the provided schema.
 ///
 /// Spec reference: §4.5
+///
+/// NOTE: The spec describes a single `generateObject()` function with an optional `client` parameter.
+/// In Rust, optional parameters are not idiomatic. This implementation provides two functions:
+/// - `generate_object(options, schema, &client)` — explicit client
+/// - `generate_object_with_default(options, schema)` — uses module-level default client
+///
+/// This is a documented Rust-specific deviation from the spec's API shape.
 pub async fn generate_object(
     mut options: GenerateOptions,
     schema: serde_json::Value,

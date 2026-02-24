@@ -16,9 +16,23 @@ pub fn get_provider_options(opts: &Option<Value>, provider: &str) -> Option<Valu
 pub fn merge_provider_options(body: &mut Value, opts: &Value, internal_keys: &[&str]) {
     if let (Some(body_obj), Some(opts_obj)) = (body.as_object_mut(), opts.as_object()) {
         for (key, value) in opts_obj {
-            if !internal_keys.contains(&key.as_str()) {
-                body_obj.insert(key.clone(), value.clone());
+            if internal_keys.contains(&key.as_str()) {
+                continue;
             }
+            // When merging "tools", append arrays instead of overwriting.
+            // This allows users to add OpenAI built-in tools via provider_options
+            // without clobbering function tools already in the body.
+            if key == "tools" {
+                if let Some(existing) = body_obj.get_mut(key) {
+                    if let (Some(existing_arr), Some(new_arr)) =
+                        (existing.as_array_mut(), value.as_array())
+                    {
+                        existing_arr.extend(new_arr.iter().cloned());
+                        continue;
+                    }
+                }
+            }
+            body_obj.insert(key.clone(), value.clone());
         }
     }
 }
@@ -81,5 +95,34 @@ mod tests {
         // Provider options should overwrite existing keys (escape hatch semantics)
         assert_eq!(body["temperature"], 0.9);
         assert_eq!(body["extra"], true);
+    }
+
+    #[test]
+    fn test_merge_provider_options_tools_array_append() {
+        // When body already has "tools" array and opts has "tools" array, append
+        let mut body = serde_json::json!({
+            "model": "test",
+            "tools": [{"type": "function", "name": "search"}]
+        });
+        let opts = serde_json::json!({
+            "tools": [{"type": "web_search_preview"}]
+        });
+        merge_provider_options(&mut body, &opts, &[]);
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2, "tools should be appended, not overwritten");
+        assert_eq!(tools[0]["name"], "search");
+        assert_eq!(tools[1]["type"], "web_search_preview");
+    }
+
+    #[test]
+    fn test_merge_provider_options_tools_no_existing_overwrites() {
+        // When body has no "tools" key, just insert
+        let mut body = serde_json::json!({"model": "test"});
+        let opts = serde_json::json!({
+            "tools": [{"type": "web_search_preview"}]
+        });
+        merge_provider_options(&mut body, &opts, &[]);
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
     }
 }

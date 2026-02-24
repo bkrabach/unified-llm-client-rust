@@ -29,6 +29,13 @@ use super::types::GenerateOptions;
 /// If `timeout.per_step` is set, wraps each individual LLM call.
 ///
 /// Spec reference: §4.3
+///
+/// NOTE: The spec describes a single `generate()` function with an optional `client` parameter.
+/// In Rust, optional parameters are not idiomatic. This implementation provides two functions:
+/// - `generate(options, &client)` — explicit client
+/// - `generate_with_default(options)` — uses module-level default client
+///
+/// This is a documented Rust-specific deviation from the spec's API shape.
 pub async fn generate(options: GenerateOptions, client: &Client) -> Result<GenerateResult, Error> {
     let abort_signal = options.abort_signal.clone();
     let timeout_config = options.timeout.clone();

@@ -894,6 +894,25 @@ fn collect_beta_headers(request: &Request) -> Vec<String> {
         }
     }
 
+    // If thinking is enabled (via reasoning_effort or explicit provider_options),
+    // auto-inject the interleaved-thinking beta
+    let has_thinking = request.reasoning_effort.is_some()
+        || request
+            .provider_options
+            .as_ref()
+            .and_then(|opts| opts.get("anthropic"))
+            .and_then(|a| a.get("thinking"))
+            .and_then(|t| t.get("type"))
+            .and_then(|t| t.as_str())
+            .map(|t| t == "enabled")
+            .unwrap_or(false);
+    if has_thinking {
+        let thinking_beta = "interleaved-thinking-2025-05-14".to_string();
+        if !betas.contains(&thinking_beta) {
+            betas.push(thinking_beta);
+        }
+    }
+
     // Deduplicate
     betas.sort();
     betas.dedup();
@@ -924,6 +943,12 @@ impl ProviderAdapter for AnthropicAdapter {
 
     fn stream(&self, request: Request) -> BoxStream<'_, Result<StreamEvent, Error>> {
         self.do_stream(request)
+    }
+
+    /// Anthropic handles "none" by omitting tools entirely rather than via an
+    /// explicit tool_choice mode. It works but differently from other providers.
+    fn supports_tool_choice(&self, mode: &str) -> bool {
+        mode != "none"
     }
 }
 
@@ -3270,6 +3295,27 @@ mod tests {
         assert!(
             system.is_string(),
             "System should be plain string when auto_cache is false"
+        );
+    }
+
+    #[test]
+    fn test_auto_cache_false_no_cache_control_injected() {
+        let req = Request::default()
+            .model("claude-sonnet-4-20250514")
+            .messages(vec![
+                Message::system("You are helpful."),
+                Message::user("Hello"),
+            ])
+            .provider_options(Some(serde_json::json!({
+                "anthropic": {"auto_cache": false}
+            })));
+        let (body, _) = translate_request_with_cache(&req);
+        // Assert NO cache_control anywhere in the body
+        let body_str = serde_json::to_string(&body).unwrap();
+        assert!(
+            !body_str.contains("cache_control"),
+            "auto_cache=false should prevent cache_control injection, but found: {}",
+            body_str
         );
     }
 
