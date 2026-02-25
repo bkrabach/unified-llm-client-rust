@@ -507,7 +507,7 @@ pub(crate) fn translate_request(request: &Request) -> (serde_json::Value, Vec<Wa
                     }
                 }),
             );
-        } else if fmt.r#type == "json_object" {
+        } else if fmt.r#type == "json" || fmt.r#type == "json_object" {
             body.insert(
                 "response_format".into(),
                 json!({

@@ -95,10 +95,10 @@ pub fn stream<'a>(options: GenerateOptions, client: &'a Client) -> Result<Stream
             .and_then(|t| t.per_step)
             .map(Duration::from_secs_f64);
 
-        // P0-1: Shared retry counter — inner first-read retry shares budget with outer
-        let mut retries_remaining: u32 = max_retries;
-
         for round in 0..=max_tool_rounds {
+            // P1-2: Retry budget is per-step (spec says retries reset each round)
+            let mut retries_remaining: u32 = max_retries;
+
             // Check cancellation before each step (DoD 8.4.9)
             if let Some(ref token) = abort_signal {
                 if token.is_cancelled() {

@@ -873,7 +873,8 @@ fn collect_beta_headers(request: &Request) -> Vec<String> {
         if let Some(anthropic_opts) = opts.get("anthropic") {
             let user_betas = anthropic_opts
                 .get("beta_headers")
-                .or_else(|| anthropic_opts.get("betas"));
+                .or_else(|| anthropic_opts.get("betas"))
+                .or_else(|| anthropic_opts.get("beta_features"));
             if let Some(user_betas) = user_betas {
                 if let Some(arr) = user_betas.as_array() {
                     for b in arr {
@@ -946,9 +947,10 @@ impl ProviderAdapter for AnthropicAdapter {
     }
 
     /// Anthropic handles "none" by omitting tools entirely rather than via an
-    /// explicit tool_choice mode. It works but differently from other providers.
-    fn supports_tool_choice(&self, mode: &str) -> bool {
-        mode != "none"
+    /// explicit tool_choice mode. The adapter does handle it correctly, so
+    /// all modes are supported.
+    fn supports_tool_choice(&self, _mode: &str) -> bool {
+        true
     }
 }
 
@@ -1076,7 +1078,7 @@ pub(crate) fn translate_request(
                 );
                 system_text.push_str(&schema_instruction);
             }
-        } else if response_format.r#type == "json_object" {
+        } else if response_format.r#type == "json" || response_format.r#type == "json_object" {
             system_text.push_str(
                 "\n\nYou MUST respond with valid JSON. \
                 Do not include any text outside the JSON object. \
@@ -1201,7 +1203,7 @@ pub(crate) fn translate_request(
     }
 
     // Provider options passthrough using shared utility.
-    const INTERNAL_KEYS: &[&str] = &["betas", "beta_headers", "auto_cache"];
+    const INTERNAL_KEYS: &[&str] = &["betas", "beta_headers", "beta_features", "auto_cache"];
     if let Some(opts) =
         crate::util::provider_options::get_provider_options(&request.provider_options, "anthropic")
     {

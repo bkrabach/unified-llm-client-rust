@@ -585,7 +585,7 @@ pub(crate) fn translate_request(
             if let Some(ref schema) = fmt.json_schema {
                 gen_config.insert("responseSchema".into(), schema.clone());
             }
-        } else if fmt.r#type == "json_object" {
+        } else if fmt.r#type == "json" || fmt.r#type == "json_object" {
             gen_config.insert(
                 "responseMimeType".into(),
                 serde_json::json!("application/json"),
@@ -1260,13 +1260,8 @@ impl GeminiStreamTranslator {
                         tool_call: Some(tool_call.clone()),
                         ..Default::default()
                     });
-                    // L-5: Emit synthetic ToolCallDelta carrying the full arguments
-                    events.push(StreamEvent {
-                        event_type: StreamEventType::ToolCallDelta,
-                        tool_call: Some(tool_call.clone()),
-                        delta: raw_args,
-                        ..Default::default()
-                    });
+                    // P3-2: Gemini delivers complete tool calls in one chunk —
+                    // START + END only, no synthetic Delta.
                     events.push(StreamEvent {
                         event_type: StreamEventType::ToolCallEnd,
                         tool_call: Some(tool_call),

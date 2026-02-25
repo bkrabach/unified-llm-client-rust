@@ -357,6 +357,11 @@ impl GenerateOptions {
         self
     }
 
+    pub fn validate_tool_args(mut self, validate: bool) -> Self {
+        self.validate_tool_args = validate;
+        self
+    }
+
     pub fn repair_tool_call(
         mut self,
         f: impl Fn(&unified_llm_types::content::ToolCallData, &str) -> Option<serde_json::Value>

@@ -455,9 +455,16 @@ pub(crate) fn translate_request(request: &Request) -> (serde_json::Value, Vec<Wa
                 // Tool results become top-level function_call_output input items
                 for part in &msg.content {
                     if let ContentPart::ToolResult { tool_result } = part {
-                        let output = match &tool_result.content {
+                        let raw_output = match &tool_result.content {
                             serde_json::Value::String(s) => s.clone(),
                             other => other.to_string(),
+                        };
+                        // P1-4: Propagate is_error flag — prefix output so the model
+                        // knows the tool invocation failed.
+                        let output = if tool_result.is_error {
+                            format!("[TOOL ERROR] {}", raw_output)
+                        } else {
+                            raw_output
                         };
                         input_items.push(serde_json::json!({
                             "type": "function_call_output",
@@ -552,7 +559,7 @@ pub(crate) fn translate_request(request: &Request) -> (serde_json::Value, Vec<Wa
                     }
                 }),
             );
-        } else if fmt.r#type == "json_object" {
+        } else if fmt.r#type == "json" || fmt.r#type == "json_object" {
             body.insert(
                 "text".into(),
                 serde_json::json!({
