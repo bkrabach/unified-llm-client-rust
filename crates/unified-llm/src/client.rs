@@ -92,6 +92,26 @@ impl Client {
     }
 
     /// Resolve which provider to use for this request.
+    /// F-2: Check if the resolved provider supports the requested tool_choice mode.
+    /// Emits a warning (not an error) when the mode isn't fully supported,
+    /// because the adapter may still handle it via a workaround (e.g., Anthropic
+    /// "none" removes tools entirely rather than sending a mode flag).
+    fn check_tool_choice_support(&self, request: &Request) -> Result<(), Error> {
+        if let Some(ref tc) = request.tool_choice {
+            if let Ok(provider) = self.resolve_provider(request) {
+                if !provider.supports_tool_choice(&tc.mode) {
+                    tracing::warn!(
+                        "Provider '{}' does not fully support tool_choice mode '{}'. \
+                         The request will proceed but behavior may differ from other providers.",
+                        provider.name(),
+                        tc.mode
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_provider(&self, request: &Request) -> Result<&dyn ProviderAdapter, Error> {
         let provider_name = request
             .provider
@@ -251,6 +271,7 @@ impl Client {
     /// so middleware can modify `request.provider` for failover/routing/A-B testing.
     pub async fn complete(&self, request: Request) -> Result<Response, Error> {
         request.validate()?;
+        self.check_tool_choice_support(&request)?;
 
         if self.middleware.is_empty() {
             let provider = self.resolve_provider(&request)?;
@@ -296,6 +317,7 @@ impl Client {
         request: Request,
     ) -> Result<BoxStream<'_, Result<StreamEvent, Error>>, Error> {
         request.validate()?;
+        self.check_tool_choice_support(&request)?;
 
         if self.middleware.is_empty() {
             let provider = self.resolve_provider(&request)?;
