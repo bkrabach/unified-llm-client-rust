@@ -152,7 +152,13 @@ impl Client {
         let timeout = Self::timeout_from_env();
 
         #[cfg(feature = "openai")]
-        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        if let Ok(key) = std::env::var("OPENAI_API_KEY").and_then(|k| {
+            if k.is_empty() {
+                Err(std::env::VarError::NotPresent)
+            } else {
+                Ok(k)
+            }
+        }) {
             let mut adapter_builder =
                 crate::providers::openai::OpenAiAdapter::builder(secrecy::SecretString::from(key));
             adapter_builder = adapter_builder.timeout(timeout.clone());
@@ -182,7 +188,13 @@ impl Client {
         }
 
         #[cfg(feature = "anthropic")]
-        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY").and_then(|k| {
+            if k.is_empty() {
+                Err(std::env::VarError::NotPresent)
+            } else {
+                Ok(k)
+            }
+        }) {
             let adapter = if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
                 crate::providers::anthropic::AnthropicAdapter::new_with_base_url_and_timeout(
                     secrecy::SecretString::from(key),
@@ -199,8 +211,15 @@ impl Client {
         }
 
         #[cfg(feature = "gemini")]
-        if let Ok(key) =
-            std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY"))
+        if let Ok(key) = std::env::var("GEMINI_API_KEY")
+            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+            .and_then(|k| {
+                if k.is_empty() {
+                    Err(std::env::VarError::NotPresent)
+                } else {
+                    Ok(k)
+                }
+            })
         {
             let adapter = if let Ok(base_url) = std::env::var("GEMINI_BASE_URL") {
                 crate::providers::gemini::GeminiAdapter::new_with_base_url_and_timeout(
