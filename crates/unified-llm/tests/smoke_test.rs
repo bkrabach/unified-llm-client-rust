@@ -14,11 +14,22 @@ const ANTHROPIC_MODEL: &str = "claude-sonnet-4-20250514";
 const OPENAI_MODEL: &str = "gpt-4o-mini";
 const GEMINI_MODEL: &str = "gemini-2.0-flash";
 
-fn require_api_keys() -> Client {
-    Client::from_env().expect(
-        "Integration tests require API keys: \
-         ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY",
-    )
+/// Returns a Client if API keys are present, or None to skip the test.
+fn try_client() -> Option<Client> {
+    Client::from_env().ok()
+}
+
+/// Macro to skip a test early when no API keys are available.
+macro_rules! require_keys {
+    () => {
+        match try_client() {
+            Some(c) => c,
+            None => {
+                eprintln!("SKIPPED (no API keys)");
+                return;
+            }
+        }
+    };
 }
 
 /// Return (provider_name, model_id) tuples for all 3 providers.
@@ -33,7 +44,7 @@ fn all_providers() -> Vec<(&'static str, &'static str)> {
 /// DoD 8.10.1: Basic generation across all 3 providers.
 #[tokio::test]
 async fn test_smoke_basic_generation_all_providers() {
-    let client = require_api_keys();
+    let client = require_keys!();
 
     for (provider_name, model) in all_providers() {
         let options = GenerateOptions::new(model)
@@ -72,7 +83,7 @@ async fn test_smoke_streaming() {
     use unified_llm::api::stream::stream;
     use unified_llm_types::StreamEventType;
 
-    let client = require_api_keys();
+    let client = require_keys!();
 
     for (provider_name, model) in all_providers() {
         let options = GenerateOptions::new(model)
@@ -115,7 +126,7 @@ async fn test_smoke_streaming() {
 async fn test_smoke_tool_calling() {
     use unified_llm::api::types::Tool;
 
-    let client = require_api_keys();
+    let client = require_keys!();
 
     for (provider_name, model) in all_providers() {
         // Gemini rejects additionalProperties in tool schemas
@@ -186,7 +197,7 @@ async fn test_smoke_tool_calling() {
 async fn test_smoke_image_input() {
     use unified_llm_types::{ContentPart, Message, Role};
 
-    let client = require_api_keys();
+    let client = require_keys!();
 
     // Minimal 1x1 red PNG
     let png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
@@ -230,7 +241,7 @@ async fn test_smoke_image_input() {
 async fn test_smoke_structured_output() {
     use unified_llm::generate_object;
 
-    let client = require_api_keys();
+    let client = require_keys!();
 
     for (provider_name, model) in all_providers() {
         // Gemini and Anthropic do not support additionalProperties
@@ -285,7 +296,7 @@ async fn test_smoke_structured_output() {
 /// DoD 8.10.6: Error handling across all 3 providers.
 #[tokio::test]
 async fn test_smoke_error_handling() {
-    let client = require_api_keys();
+    let client = require_keys!();
 
     for (provider_name, _model) in all_providers() {
         let options = GenerateOptions::new("nonexistent-model-xyz")

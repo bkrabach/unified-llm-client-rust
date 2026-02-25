@@ -14,12 +14,22 @@ const OPENAI_MODEL: &str = "gpt-4o-mini";
 const ANTHROPIC_MODEL: &str = "claude-sonnet-4-20250514";
 const GEMINI_MODEL: &str = "gemini-2.0-flash";
 
-/// Require a client or panic (skip the test).
-fn require_client() -> Client {
-    Client::from_env().expect(
-        "Compliance tests require API keys: \
-         ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY",
-    )
+/// Returns a Client if API keys are present, or None to skip the test.
+fn try_client() -> Option<Client> {
+    Client::from_env().ok()
+}
+
+/// Macro to skip a test early when no API keys are available.
+macro_rules! require_client {
+    () => {
+        match try_client() {
+            Some(c) => c,
+            None => {
+                eprintln!("SKIPPED (no API keys)");
+                return;
+            }
+        }
+    };
 }
 
 /// Retry helper: retries an async operation up to `max` times with linear `delay_secs` backoff.
@@ -58,7 +68,7 @@ fn dod_pass(cell_id: &str) {
 
 #[tokio::test]
 async fn compliance_8_9_1_text_generation_openai() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(OPENAI_MODEL)
             .prompt("Say hello in one sentence.")
@@ -82,7 +92,7 @@ async fn compliance_8_9_1_text_generation_openai() {
 
 #[tokio::test]
 async fn compliance_8_9_1_text_generation_anthropic() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(ANTHROPIC_MODEL)
             .prompt("Say hello in one sentence.")
@@ -112,7 +122,7 @@ async fn compliance_8_9_1_text_generation_anthropic() {
 
 #[tokio::test]
 async fn compliance_8_9_1_text_generation_gemini() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(GEMINI_MODEL)
             .prompt("Say hello in one sentence.")
@@ -144,7 +154,7 @@ async fn compliance_8_9_2_streaming_openai() {
     use unified_llm::api::stream::stream;
     use unified_llm_types::StreamEventType;
 
-    let client = require_client();
+    let client = require_client!();
 
     let opts = GenerateOptions::new(OPENAI_MODEL)
         .prompt("Write a haiku about the ocean.")
@@ -187,7 +197,7 @@ async fn compliance_8_9_2_streaming_anthropic() {
     use unified_llm::api::stream::stream;
     use unified_llm_types::StreamEventType;
 
-    let client = require_client();
+    let client = require_client!();
 
     let opts = GenerateOptions::new(ANTHROPIC_MODEL)
         .prompt("Write a haiku about the ocean.")
@@ -230,7 +240,7 @@ async fn compliance_8_9_2_streaming_gemini() {
     use unified_llm::api::stream::stream;
     use unified_llm_types::StreamEventType;
 
-    let client = require_client();
+    let client = require_client!();
 
     let opts = GenerateOptions::new(GEMINI_MODEL)
         .prompt("Write a haiku about the ocean.")
@@ -322,7 +332,7 @@ fn make_weather_tool_gemini() -> unified_llm::api::types::Tool {
 
 #[tokio::test]
 async fn compliance_8_9_5_single_tool_openai() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(OPENAI_MODEL)
             .prompt("What's the weather in Paris?")
@@ -352,7 +362,7 @@ async fn compliance_8_9_5_single_tool_openai() {
 
 #[tokio::test]
 async fn compliance_8_9_5_single_tool_anthropic() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(ANTHROPIC_MODEL)
             .prompt("What's the weather in Paris?")
@@ -382,7 +392,7 @@ async fn compliance_8_9_5_single_tool_anthropic() {
 
 #[tokio::test]
 async fn compliance_8_9_5_single_tool_gemini() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(GEMINI_MODEL)
             .prompt("What's the weather in Paris?")
@@ -416,7 +426,7 @@ async fn compliance_8_9_5_single_tool_gemini() {
 
 #[tokio::test]
 async fn compliance_8_9_6_parallel_tools_openai() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(OPENAI_MODEL)
             .prompt("What's the weather in Paris and London?")
@@ -451,7 +461,7 @@ async fn compliance_8_9_6_parallel_tools_openai() {
 
 #[tokio::test]
 async fn compliance_8_9_6_parallel_tools_anthropic() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(ANTHROPIC_MODEL)
             .prompt("What's the weather in Paris and London?")
@@ -486,7 +496,7 @@ async fn compliance_8_9_6_parallel_tools_anthropic() {
 
 #[tokio::test]
 async fn compliance_8_9_6_parallel_tools_gemini() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(GEMINI_MODEL)
             .prompt("What's the weather in Paris and London?")
@@ -529,7 +539,7 @@ async fn compliance_8_9_8_streaming_tools_openai() {
     use unified_llm::api::stream::stream;
     use unified_llm_types::StreamEventType;
 
-    let client = require_client();
+    let client = require_client!();
 
     let opts = GenerateOptions::new(OPENAI_MODEL)
         .prompt("What's the weather in Paris?")
@@ -579,7 +589,7 @@ async fn compliance_8_9_8_streaming_tools_anthropic() {
     use unified_llm::api::stream::stream;
     use unified_llm_types::StreamEventType;
 
-    let client = require_client();
+    let client = require_client!();
 
     let opts = GenerateOptions::new(ANTHROPIC_MODEL)
         .prompt("What's the weather in Paris?")
@@ -628,7 +638,7 @@ async fn compliance_8_9_8_streaming_tools_gemini() {
     use unified_llm::api::stream::stream;
     use unified_llm_types::StreamEventType;
 
-    let client = require_client();
+    let client = require_client!();
 
     let opts = GenerateOptions::new(GEMINI_MODEL)
         .prompt("What's the weather in Paris?")
@@ -684,7 +694,7 @@ async fn compliance_8_9_8_streaming_tools_gemini() {
 async fn compliance_error_handling_404_openai() {
     use unified_llm_types::ErrorKind;
 
-    let client = require_client();
+    let client = require_client!();
 
     let opts = GenerateOptions::new("nonexistent-model-xyz-9999")
         .prompt("test")
@@ -716,7 +726,7 @@ async fn compliance_error_handling_404_openai() {
 async fn compliance_error_handling_404_anthropic() {
     use unified_llm_types::ErrorKind;
 
-    let client = require_client();
+    let client = require_client!();
 
     let opts = GenerateOptions::new("nonexistent-model-xyz-9999")
         .prompt("test")
@@ -748,7 +758,7 @@ async fn compliance_error_handling_404_anthropic() {
 async fn compliance_error_handling_404_gemini() {
     use unified_llm_types::ErrorKind;
 
-    let client = require_client();
+    let client = require_client!();
 
     let opts = GenerateOptions::new("nonexistent-model-xyz-9999")
         .prompt("test")
@@ -870,7 +880,7 @@ async fn compliance_8_9_11_auth_error_gemini() {
 
 #[tokio::test]
 async fn compliance_8_9_9_structured_output_openai() {
-    let client = require_client();
+    let client = require_client!();
 
     let schema = serde_json::json!({
         "type": "object",
@@ -902,7 +912,7 @@ async fn compliance_8_9_9_structured_output_openai() {
 
 #[tokio::test]
 async fn compliance_8_9_9_structured_output_gemini() {
-    let client = require_client();
+    let client = require_client!();
 
     // Gemini does not support "additionalProperties" in response schemas.
     let schema = serde_json::json!({
@@ -938,7 +948,7 @@ async fn compliance_8_9_9_structured_output_gemini() {
 // schema after generation.
 #[tokio::test]
 async fn compliance_8_9_9_structured_output_anthropic() {
-    let client = require_client();
+    let client = require_client!();
 
     let schema = serde_json::json!({
         "type": "object",
@@ -973,7 +983,7 @@ async fn compliance_8_9_9_structured_output_anthropic() {
 
 #[tokio::test]
 async fn compliance_8_9_13_usage_accuracy_openai() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(OPENAI_MODEL)
             .prompt("Say hello.")
@@ -1000,7 +1010,7 @@ async fn compliance_8_9_13_usage_accuracy_openai() {
 
 #[tokio::test]
 async fn compliance_8_9_13_usage_accuracy_anthropic() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(ANTHROPIC_MODEL)
             .prompt("Say hello.")
@@ -1029,7 +1039,7 @@ async fn compliance_8_9_13_usage_accuracy_anthropic() {
 
 #[tokio::test]
 async fn compliance_8_9_13_usage_accuracy_gemini() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(GEMINI_MODEL)
             .prompt("Say hello.")
@@ -1063,7 +1073,7 @@ async fn compliance_8_9_13_usage_accuracy_gemini() {
 
 #[tokio::test]
 async fn compliance_8_9_15_provider_options_anthropic() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(ANTHROPIC_MODEL)
             .prompt("Say hello in one sentence.")
@@ -1091,7 +1101,7 @@ async fn compliance_8_9_15_provider_options_anthropic() {
 
 #[tokio::test]
 async fn compliance_8_9_15_provider_options_openai() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(OPENAI_MODEL)
             .prompt("Say hello in one sentence.")
@@ -1117,7 +1127,7 @@ async fn compliance_8_9_15_provider_options_openai() {
 
 #[tokio::test]
 async fn compliance_8_9_15_provider_options_gemini() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(GEMINI_MODEL)
             .prompt("Say hello in one sentence.")
@@ -1150,7 +1160,7 @@ async fn compliance_stream_object_openai() {
     use futures::StreamExt;
     use unified_llm::api::stream_object::stream_object;
 
-    let client = require_client();
+    let client = require_client!();
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -1187,7 +1197,7 @@ async fn compliance_stream_object_gemini() {
     use futures::StreamExt;
     use unified_llm::api::stream_object::stream_object;
 
-    let client = require_client();
+    let client = require_client!();
     // Gemini does not support "additionalProperties" in response schemas.
     let schema = serde_json::json!({
         "type": "object",
@@ -1224,7 +1234,7 @@ async fn compliance_stream_object_anthropic() {
     use futures::StreamExt;
     use unified_llm::api::stream_object::stream_object;
 
-    let client = require_client();
+    let client = require_client!();
     // Anthropic does not support "additionalProperties" in schemas.
     let schema = serde_json::json!({
         "type": "object",
@@ -1270,7 +1280,7 @@ async fn compliance_stream_object_anthropic() {
 async fn compliance_8_6_9_multi_turn_caching_anthropic() {
     use unified_llm_types::Message;
 
-    let client = require_client();
+    let client = require_client!();
     // Use a large system prompt (≥4000 tokens) to exceed provider cache
     // thresholds: Anthropic requires ≥1024 tokens, OpenAI ≥1024 token prefix.
     let system_text = "You are a helpful assistant. ".repeat(500); // ~13000 chars / ~3250 tokens
@@ -1342,7 +1352,7 @@ fn decode_tiny_png() -> Vec<u8> {
 async fn compliance_8_9_3_image_base64_openai() {
     use unified_llm_types::{ContentPart, Message, Role};
 
-    let client = require_client();
+    let client = require_client!();
     let png_bytes = decode_tiny_png();
 
     let messages = vec![Message {
@@ -1380,7 +1390,7 @@ async fn compliance_8_9_3_image_base64_openai() {
 async fn compliance_8_9_3_image_base64_anthropic() {
     use unified_llm_types::{ContentPart, Message, Role};
 
-    let client = require_client();
+    let client = require_client!();
     let png_bytes = decode_tiny_png();
 
     let messages = vec![Message {
@@ -1421,7 +1431,7 @@ async fn compliance_8_9_3_image_base64_anthropic() {
 async fn compliance_8_9_3_image_base64_gemini() {
     use unified_llm_types::{ContentPart, Message, Role};
 
-    let client = require_client();
+    let client = require_client!();
     let png_bytes = decode_tiny_png();
 
     let messages = vec![Message {
@@ -1466,7 +1476,7 @@ async fn compliance_8_9_3_image_base64_gemini() {
 async fn compliance_8_6_9_multi_turn_caching_openai() {
     use unified_llm_types::Message;
 
-    let client = require_client();
+    let client = require_client!();
     let system_text = "You are a helpful assistant. ".repeat(500);
     let mut messages = vec![Message::system(&system_text)];
 
@@ -1522,7 +1532,7 @@ async fn compliance_8_6_9_multi_turn_caching_openai() {
 async fn compliance_8_6_9_multi_turn_caching_gemini() {
     use unified_llm_types::Message;
 
-    let client = require_client();
+    let client = require_client!();
     let system_text = "You are a helpful assistant. ".repeat(500);
     let mut messages = vec![Message::system(&system_text)];
 
@@ -1585,7 +1595,7 @@ const TEST_IMAGE_URL: &str =
 async fn compliance_8_9_4_image_url_anthropic() {
     use unified_llm_types::{ContentPart, Message, Role};
 
-    let client = require_client();
+    let client = require_client!();
 
     let messages = vec![Message {
         role: Role::User,
@@ -1625,7 +1635,7 @@ async fn compliance_8_9_4_image_url_anthropic() {
 async fn compliance_8_9_4_image_url_openai() {
     use unified_llm_types::{ContentPart, Message, Role};
 
-    let client = require_client();
+    let client = require_client!();
 
     let messages = vec![Message {
         role: Role::User,
@@ -1665,7 +1675,7 @@ async fn compliance_8_9_4_image_url_openai() {
 async fn compliance_8_9_4_image_url_gemini() {
     use unified_llm_types::{ContentPart, Message, Role};
 
-    let client = require_client();
+    let client = require_client!();
 
     // Gemini's generateContent API doesn't support fetching arbitrary HTTP URLs
     // for fileData — it only accepts Google Cloud Storage URIs or inline base64.
@@ -1764,7 +1774,7 @@ fn make_count_step_tool_gemini() -> unified_llm::api::types::Tool {
 
 #[tokio::test]
 async fn compliance_8_9_7_multi_step_tool_loop_openai() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(OPENAI_MODEL)
             .prompt("Call the count_step tool 3 times: first with step=1, then step=2, then step=3. After all 3 calls, summarize the results.")
@@ -1792,7 +1802,7 @@ async fn compliance_8_9_7_multi_step_tool_loop_openai() {
 
 #[tokio::test]
 async fn compliance_8_9_7_multi_step_tool_loop_anthropic() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(ANTHROPIC_MODEL)
             .prompt("Call the count_step tool 3 times: first with step=1, then step=2, then step=3. After all 3 calls, summarize the results.")
@@ -1818,7 +1828,7 @@ async fn compliance_8_9_7_multi_step_tool_loop_anthropic() {
 
 #[tokio::test]
 async fn compliance_8_9_7_multi_step_tool_loop_gemini() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new(GEMINI_MODEL)
             .prompt("Call the count_step tool 3 times: first with step=1, then step=2, then step=3. After all 3 calls, summarize the results.")
@@ -1848,7 +1858,7 @@ async fn compliance_8_9_7_multi_step_tool_loop_gemini() {
 
 #[tokio::test]
 async fn compliance_8_9_10_reasoning_tokens_openai() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         // Use a harder prompt to encourage reasoning output from o4-mini.
         let opts = GenerateOptions::new("o4-mini")
@@ -1893,7 +1903,7 @@ async fn compliance_8_9_10_reasoning_tokens_openai() {
 
 #[tokio::test]
 async fn compliance_8_9_10_reasoning_tokens_anthropic() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         let opts = GenerateOptions::new("claude-sonnet-4-20250514")
             .prompt(
@@ -1949,7 +1959,7 @@ async fn compliance_8_9_10_reasoning_tokens_anthropic() {
 
 #[tokio::test]
 async fn compliance_8_9_10_reasoning_tokens_gemini() {
-    let client = require_client();
+    let client = require_client!();
     let result = with_compliance_retry(3, 2, || {
         // Use a model with native thinking support. Do NOT set reasoning_effort
         // (which sends thinkingConfig) — just let the model think natively and

@@ -37,5 +37,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-features --workspace -- -D warnings
 
-      - name: Run offline tests
+      - name: Run tests
         run: cargo test --all-features --workspace
+        env:
+          # Live API tests skip gracefully when keys are absent.
+          # To run live tests in CI, add these as repository secrets.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
