@@ -12,7 +12,6 @@ use futures_core::Stream;
 use unified_llm_types::*;
 
 use crate::client::Client;
-use crate::util::retry::with_retry;
 use crate::util::stream_accumulator::StreamAccumulator;
 
 use super::generate::{build_request, build_step_result, standardize_messages};
@@ -124,18 +123,25 @@ pub fn stream<'a>(options: GenerateOptions, client: &'a Client) -> Result<Stream
 
             let request = build_request(&options, &conversation, &tool_definitions);
 
-            // Retry the stream connection for this step.
-            let mut provider_stream = match with_retry(&retry_policy, || {
-                let req = request.clone();
-                async move {
-                    let s = client.stream(req)?;
-                    Ok(s)
-                }
-            }).await {
+            // Single shared retry budget per step (no outer with_retry —
+            // connection failures and first-read errors share one counter).
+            let mut provider_stream = match client.stream(request.clone()) {
                 Ok(s) => s,
                 Err(e) => {
-                    yield Err(e);
-                    return;
+                    if e.retryable && retries_remaining > 0 {
+                        retries_remaining -= 1;
+                        let delay = crate::util::retry::calculate_delay(
+                            &retry_policy, max_retries - retries_remaining - 1, e.retry_after,
+                        );
+                        tokio::time::sleep(delay).await;
+                        match client.stream(request.clone()) {
+                            Ok(s) => s,
+                            Err(e2) => { yield Err(e2); return; }
+                        }
+                    } else {
+                        yield Err(e);
+                        return;
+                    }
                 }
             };
 

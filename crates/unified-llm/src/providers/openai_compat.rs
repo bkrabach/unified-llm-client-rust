@@ -412,9 +412,15 @@ pub(crate) fn translate_request(request: &Request) -> (serde_json::Value, Vec<Wa
                 // Each tool result is a separate message with role "tool"
                 for part in &msg.content {
                     if let ContentPart::ToolResult { tool_result } = part {
-                        let content = match &tool_result.content {
+                        let raw_content = match &tool_result.content {
                             serde_json::Value::String(s) => s.clone(),
                             other => other.to_string(),
+                        };
+                        // Propagate is_error flag (same pattern as openai.rs)
+                        let content = if tool_result.is_error {
+                            format!("[TOOL ERROR] {}", raw_content)
+                        } else {
+                            raw_content
                         };
                         messages.push(json!({
                             "role": "tool",
