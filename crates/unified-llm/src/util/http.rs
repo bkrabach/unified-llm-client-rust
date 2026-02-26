@@ -7,7 +7,7 @@ use serde_json::Value;
 
 /// Parse the `Retry-After` header as either numeric seconds or HTTP-date (RFC 7231).
 /// Returns `None` if the header is missing, cannot be parsed, or the date is in the past.
-pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get("retry-after")?.to_str().ok()?;
 
     // Try numeric seconds first (most common for APIs)
@@ -34,7 +34,7 @@ pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
 
 /// Walk a nested JSON value using an array of string keys.
 /// Returns `Some(&Value)` at the end of the path, or `None` if any key is missing.
-pub fn extract_json_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+pub(crate) fn extract_json_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
     let mut current = value;
     for key in path {
         current = current.get(*key)?;
@@ -47,7 +47,7 @@ pub fn extract_json_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Valu
 ///
 /// Returns `(message, Option<code>)`. If the message path doesn't resolve,
 /// falls back to the full JSON body serialized as a string.
-pub fn parse_provider_error_message(
+pub(crate) fn parse_provider_error_message(
     body: &Value,
     message_path: &[&str],
     code_path: &[&str],
@@ -67,7 +67,9 @@ pub fn parse_provider_error_message(
 /// Parse rate limit information from HTTP response headers.
 /// Returns `None` if no rate limit headers are present.
 /// Handles the `x-ratelimit-*` header convention used by OpenAI, Anthropic, etc.
-pub fn parse_rate_limit_headers(headers: &HeaderMap) -> Option<unified_llm_types::RateLimitInfo> {
+pub(crate) fn parse_rate_limit_headers(
+    headers: &HeaderMap,
+) -> Option<unified_llm_types::RateLimitInfo> {
     let get_u32 = |name: &str| -> Option<u32> {
         headers
             .get(name)
@@ -106,6 +108,48 @@ pub fn parse_rate_limit_headers(headers: &HeaderMap) -> Option<unified_llm_types
         tokens_limit,
         reset_at,
     })
+}
+
+/// Build a reqwest HTTP client with the given timeout and optional default headers.
+/// Uses graceful fallback to `reqwest::Client::new()` on build failure.
+pub(crate) fn build_http_client(
+    timeout: &crate::AdapterTimeout,
+    default_headers: Option<reqwest::header::HeaderMap>,
+) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs_f64(timeout.connect))
+        .timeout(std::time::Duration::from_secs_f64(timeout.request));
+    if let Some(headers) = default_headers {
+        builder = builder.default_headers(headers);
+    }
+    builder.build().unwrap_or_else(|e| {
+        tracing::error!("Failed to build HTTP client: {}", e);
+        reqwest::Client::new()
+    })
+}
+
+/// Build a unified Error from an HTTP error response.
+///
+/// Shared helper for the common parse_error pattern across providers:
+/// parse retry-after, create error from status, set error code.
+pub(crate) fn build_provider_error(
+    status: u16,
+    headers: &HeaderMap,
+    body: serde_json::Value,
+    provider: &str,
+    message: String,
+    error_code: Option<String>,
+) -> unified_llm_types::Error {
+    let retry_after = parse_retry_after(headers);
+    let mut err = unified_llm_types::Error::from_http_status(
+        status,
+        message,
+        provider,
+        Some(body),
+        retry_after,
+    );
+    err.error_code = error_code;
+    err
 }
 
 #[cfg(test)]

@@ -1808,7 +1808,6 @@ dependencies = [
  "httpdate",
  "jsonschema",
  "mime_guess",
- "once_cell",
  "pin-project-lite",
  "rand",
  "reqwest",

@@ -5,12 +5,12 @@ use std::path::Path;
 use base64::Engine;
 
 /// Check if a string looks like a local file path (starts with `/`, `./`, `../`, or `~`).
-pub fn is_local_path(s: &str) -> bool {
+pub(crate) fn is_local_path(s: &str) -> bool {
     s.starts_with('/') || s.starts_with("./") || s.starts_with("../") || s.starts_with('~')
 }
 
 /// Infer a MIME type from a file path extension. Defaults to `"image/png"` if unknown.
-pub fn infer_mime_type(path: &str) -> &'static str {
+pub(crate) fn infer_mime_type(path: &str) -> &'static str {
     mime_guess::from_path(path)
         .first()
         .map(|m| match m.as_ref() {
@@ -25,12 +25,12 @@ pub fn infer_mime_type(path: &str) -> &'static str {
 
 /// Build a data URI from a MIME type and already-base64-encoded data.
 /// Returns `data:{mime};base64,{data}`.
-pub fn encode_data_uri(mime_type: &str, base64_data: &str) -> String {
+pub(crate) fn encode_data_uri(mime_type: &str, base64_data: &str) -> String {
     format!("data:{mime_type};base64,{base64_data}")
 }
 
 /// Encode raw bytes to a base64 string using the STANDARD alphabet.
-pub fn base64_encode(data: &[u8]) -> String {
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
@@ -42,7 +42,7 @@ pub fn base64_encode(data: &[u8]) -> String {
 /// NOTE: This uses blocking `std::fs::read`. Prefer calling
 /// [`pre_resolve_local_images`] from async contexts so that this
 /// sync fallback path is never reached in production.
-pub fn resolve_local_file(url: &str) -> Result<(Vec<u8>, String), unified_llm_types::Error> {
+pub(crate) fn resolve_local_file(url: &str) -> Result<(Vec<u8>, String), unified_llm_types::Error> {
     let path = expand_tilde(url);
 
     let data = std::fs::read(&path).map_err(|e| unified_llm_types::Error {
@@ -65,7 +65,7 @@ pub fn resolve_local_file(url: &str) -> Result<(Vec<u8>, String), unified_llm_ty
 /// H-4: Non-blocking version of [`resolve_local_file`] for use in async contexts.
 ///
 /// Uses `tokio::fs::read` to avoid blocking the Tokio runtime.
-pub async fn resolve_local_file_async(
+pub(crate) async fn resolve_local_file_async(
     url: &str,
 ) -> Result<(Vec<u8>, String), unified_llm_types::Error> {
     let path = expand_tilde(url);
@@ -106,7 +106,7 @@ fn expand_tilde(url: &str) -> std::path::PathBuf {
 /// **before** passing the request to the sync `translate_request` functions.
 /// After pre-resolution, `image.data` is populated with file bytes so the
 /// sync translate path never hits `resolve_local_file`.
-pub async fn pre_resolve_local_images(
+pub(crate) async fn pre_resolve_local_images(
     messages: &mut [unified_llm_types::Message],
 ) -> Result<(), unified_llm_types::Error> {
     for msg in messages.iter_mut() {

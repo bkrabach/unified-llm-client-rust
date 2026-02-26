@@ -5,18 +5,18 @@
 
 use std::sync::RwLock;
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use unified_llm_types::{Error, ModelInfo};
 
 /// Embedded model catalog JSON, loaded at compile time.
 static CATALOG_JSON: &str = include_str!("catalog.json");
 
 /// Parsed catalog, lazily initialized on first access.
-static CATALOG: Lazy<Vec<ModelInfo>> =
-    Lazy::new(|| serde_json::from_str(CATALOG_JSON).expect("catalog.json must be valid JSON"));
+static CATALOG: LazyLock<Vec<ModelInfo>> =
+    LazyLock::new(|| serde_json::from_str(CATALOG_JSON).expect("catalog.json must be valid JSON"));
 
 /// Additional models loaded at runtime (merged or replaced catalogs).
-static EXTRA_MODELS: Lazy<RwLock<Vec<ModelInfo>>> = Lazy::new(|| RwLock::new(Vec::new()));
+static EXTRA_MODELS: LazyLock<RwLock<Vec<ModelInfo>>> = LazyLock::new(|| RwLock::new(Vec::new()));
 
 /// Load a custom catalog from a JSON string.
 /// The custom models are merged into the catalog (they take precedence

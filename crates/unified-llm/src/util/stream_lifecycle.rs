@@ -16,7 +16,7 @@ use unified_llm_types::StreamEventType;
 /// This validator logs warnings via `tracing::warn!` when events arrive
 /// out of expected order, helping catch adapter bugs without crashing.
 #[derive(Debug)]
-pub struct StreamLifecycle {
+pub(crate) struct StreamLifecycle {
     started: bool,
     finished: bool,
     in_text: bool,

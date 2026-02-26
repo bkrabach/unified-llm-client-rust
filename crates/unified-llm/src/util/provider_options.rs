@@ -4,7 +4,7 @@ use serde_json::Value;
 
 /// Extract provider-specific options from the nested `provider_options` map.
 /// Returns `Some(Value)` if the provider key exists, `None` otherwise.
-pub fn get_provider_options(opts: &Option<Value>, provider: &str) -> Option<Value> {
+pub(crate) fn get_provider_options(opts: &Option<Value>, provider: &str) -> Option<Value> {
     opts.as_ref().and_then(|v| v.get(provider)).cloned()
 }
 
@@ -13,7 +13,7 @@ pub fn get_provider_options(opts: &Option<Value>, provider: &str) -> Option<Valu
 /// `opts` should be the provider-specific options value (e.g., the result of
 /// `get_provider_options()`). Each key in `opts` is inserted into `body` unless
 /// it appears in `internal_keys`.
-pub fn merge_provider_options(body: &mut Value, opts: &Value, internal_keys: &[&str]) {
+pub(crate) fn merge_provider_options(body: &mut Value, opts: &Value, internal_keys: &[&str]) {
     if let (Some(body_obj), Some(opts_obj)) = (body.as_object_mut(), opts.as_object()) {
         for (key, value) in opts_obj {
             if internal_keys.contains(&key.as_str()) {

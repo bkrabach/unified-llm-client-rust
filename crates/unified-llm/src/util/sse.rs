@@ -2,7 +2,7 @@
 
 /// A parsed SSE event.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SseEvent {
+pub(crate) struct SseEvent {
     /// The event type (from `event:` field).
     pub event_type: Option<String>,
     /// The data payload (from `data:` field(s), joined with newlines).
@@ -18,7 +18,7 @@ pub struct SseEvent {
 /// Feed chunks of text via `feed()` and receive complete events.
 /// Handles: `event:`, `data:`, `id:`, `retry:` fields, comment lines
 /// (`:` prefix), multi-line data, and blank line boundaries.
-pub struct SseParser {
+pub(crate) struct SseParser {
     /// Buffer for incomplete lines spanning chunk boundaries.
     buffer: String,
     /// Current event type being accumulated.

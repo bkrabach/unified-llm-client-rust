@@ -47,7 +47,7 @@ impl OpenAICompatibleAdapter {
             api_key,
             base_url: crate::util::normalize_base_url(&base_url.into()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
-            http_client: Self::build_http_client(&timeout),
+            http_client: crate::util::http::build_http_client(&timeout, None),
         }
     }
 
@@ -61,7 +61,7 @@ impl OpenAICompatibleAdapter {
             api_key,
             base_url: crate::util::normalize_base_url(&base_url.into()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
-            http_client: Self::build_http_client(&timeout),
+            http_client: crate::util::http::build_http_client(&timeout, None),
         }
     }
 
@@ -74,28 +74,6 @@ impl OpenAICompatibleAdapter {
         base_url: impl Into<String>,
     ) -> OpenAICompatibleAdapterBuilder {
         OpenAICompatibleAdapterBuilder::new(api_key, base_url)
-    }
-
-    /// Build an HTTP client with the given timeout configuration.
-    ///
-    /// Wires `connect` → `connect_timeout()` and `request` → `timeout()`.
-    /// Note: `stream_read` requires a custom per-chunk timeout implementation
-    /// and is not wired here.
-    fn build_http_client(timeout: &AdapterTimeout) -> reqwest::Client {
-        Self::build_http_client_with_headers(timeout, None)
-    }
-
-    fn build_http_client_with_headers(
-        timeout: &AdapterTimeout,
-        default_headers: Option<reqwest::header::HeaderMap>,
-    ) -> reqwest::Client {
-        let mut builder = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs_f64(timeout.connect))
-            .timeout(std::time::Duration::from_secs_f64(timeout.request));
-        if let Some(headers) = default_headers {
-            builder = builder.default_headers(headers);
-        }
-        builder.build().expect("Failed to build HTTP client")
     }
 
     /// Perform the actual HTTP request for complete().
@@ -196,10 +174,7 @@ impl OpenAICompatibleAdapterBuilder {
             api_key: self.api_key,
             base_url: self.base_url,
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
-            http_client: OpenAICompatibleAdapter::build_http_client_with_headers(
-                &timeout,
-                self.default_headers,
-            ),
+            http_client: crate::util::http::build_http_client(&timeout, self.default_headers),
         }
     }
 }
@@ -730,11 +705,13 @@ pub(crate) fn parse_response(
     let input_tokens = usage_obj
         .and_then(|u| u.get("prompt_tokens"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+        .unwrap_or(0);
     let output_tokens = usage_obj
         .and_then(|u| u.get("completion_tokens"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+        .unwrap_or(0);
     let usage = Usage {
         input_tokens,
         output_tokens,
@@ -744,12 +721,12 @@ pub(crate) fn parse_response(
             .and_then(|u| u.get("completion_tokens_details"))
             .and_then(|d| d.get("reasoning_tokens"))
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32),
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
         cache_read_tokens: usage_obj
             .and_then(|u| u.get("prompt_tokens_details"))
             .and_then(|d| d.get("cached_tokens"))
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32),
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
         cache_write_tokens: None,
         raw: usage_obj.cloned(),
     };
@@ -785,18 +762,14 @@ pub(crate) fn parse_error(
         &["error", "message"],
         &["error", "code"],
     );
-
-    let retry_after = crate::util::http::parse_retry_after(headers);
-
-    let mut err = Error::from_http_status(
+    crate::util::http::build_provider_error(
         status,
-        error_message,
+        headers,
+        body,
         "openai-compatible",
-        Some(body),
-        retry_after,
-    );
-    err.error_code = error_code;
-    err
+        error_message,
+        error_code,
+    )
 }
 
 // === Stream Translation ===
@@ -1044,12 +1017,16 @@ impl ChatCompletionsStreamTranslator {
 
                 // Usage — may be on the same chunk or a subsequent one
                 let usage = data.get("usage").map(|u| {
-                    let input_tokens =
-                        u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let input_tokens = u
+                        .get("prompt_tokens")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+                        .unwrap_or(0);
                     let output_tokens = u
                         .get("completion_tokens")
                         .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32;
+                        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+                        .unwrap_or(0);
                     Usage {
                         input_tokens,
                         output_tokens,
@@ -1059,13 +1036,13 @@ impl ChatCompletionsStreamTranslator {
                             .get("completion_tokens_details")
                             .and_then(|d| d.get("reasoning_tokens"))
                             .and_then(|v| v.as_u64())
-                            .map(|v| v as u32),
+                            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
                         // BUG-1: Extract cached_tokens from streaming usage (was hardcoded None)
                         cache_read_tokens: u
                             .get("prompt_tokens_details")
                             .and_then(|d| d.get("cached_tokens"))
                             .and_then(|v| v.as_u64())
-                            .map(|v| v as u32),
+                            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
                         cache_write_tokens: None,
                         raw: Some(u.clone()),
                     }
@@ -1083,12 +1060,16 @@ impl ChatCompletionsStreamTranslator {
         // Handle standalone usage chunk (some providers send usage separately)
         if choice.is_none() {
             if let Some(u) = data.get("usage") {
-                let input_tokens =
-                    u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let input_tokens = u
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+                    .unwrap_or(0);
                 let output_tokens = u
                     .get("completion_tokens")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
+                    .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+                    .unwrap_or(0);
                 let usage = Usage {
                     input_tokens,
                     output_tokens,
@@ -1098,13 +1079,13 @@ impl ChatCompletionsStreamTranslator {
                         .get("completion_tokens_details")
                         .and_then(|d| d.get("reasoning_tokens"))
                         .and_then(|v| v.as_u64())
-                        .map(|v| v as u32),
+                        .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
                     // BUG-1: Extract cached_tokens from standalone usage chunk (was hardcoded None)
                     cache_read_tokens: u
                         .get("prompt_tokens_details")
                         .and_then(|d| d.get("cached_tokens"))
                         .and_then(|v| v.as_u64())
-                        .map(|v| v as u32),
+                        .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
                     cache_write_tokens: None,
                     raw: Some(u.clone()),
                 };

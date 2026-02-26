@@ -8,18 +8,18 @@
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 use unified_llm_types::Error;
 
 use crate::client::Client;
 
 /// The global default client. Wraps `Option<Arc<Client>>`.
-static DEFAULT_CLIENT: Lazy<ArcSwap<Option<Arc<Client>>>> =
-    Lazy::new(|| ArcSwap::from_pointee(None));
+static DEFAULT_CLIENT: LazyLock<ArcSwap<Option<Arc<Client>>>> =
+    LazyLock::new(|| ArcSwap::from_pointee(None));
 
 /// Guard for the lazy-init path to prevent TOCTOU double-initialization.
-static INIT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static INIT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Set the module-level default client explicitly.
 ///

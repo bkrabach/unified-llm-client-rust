@@ -37,7 +37,7 @@ impl GeminiAdapter {
         Self {
             api_key,
             base_url: DEFAULT_BASE_URL.to_string(),
-            http_client: Self::build_http_client(&timeout),
+            http_client: crate::util::http::build_http_client(&timeout, None),
             tool_call_map: Mutex::new(HashMap::new()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
         }
@@ -51,7 +51,7 @@ impl GeminiAdapter {
         Self {
             api_key,
             base_url: crate::util::normalize_base_url(&base_url.into()),
-            http_client: Self::build_http_client(&timeout),
+            http_client: crate::util::http::build_http_client(&timeout, None),
             tool_call_map: Mutex::new(HashMap::new()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
         }
@@ -62,7 +62,7 @@ impl GeminiAdapter {
         Self {
             api_key,
             base_url: DEFAULT_BASE_URL.to_string(),
-            http_client: Self::build_http_client(&timeout),
+            http_client: crate::util::http::build_http_client(&timeout, None),
             tool_call_map: Mutex::new(HashMap::new()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
         }
@@ -77,7 +77,7 @@ impl GeminiAdapter {
         Self {
             api_key,
             base_url: crate::util::normalize_base_url(&base_url.into()),
-            http_client: Self::build_http_client(&timeout),
+            http_client: crate::util::http::build_http_client(&timeout, None),
             tool_call_map: Mutex::new(HashMap::new()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
         }
@@ -94,28 +94,6 @@ impl GeminiAdapter {
     /// Create a builder for fine-grained configuration.
     pub fn builder(api_key: SecretString) -> GeminiAdapterBuilder {
         GeminiAdapterBuilder::new(api_key)
-    }
-
-    /// Build an HTTP client with the given timeout configuration.
-    ///
-    /// Wires `connect` → `connect_timeout()` and `request` → `timeout()`.
-    /// Note: `stream_read` requires a custom per-chunk timeout implementation
-    /// and is not wired here.
-    fn build_http_client(timeout: &AdapterTimeout) -> reqwest::Client {
-        Self::build_http_client_with_headers(timeout, None)
-    }
-
-    fn build_http_client_with_headers(
-        timeout: &AdapterTimeout,
-        default_headers: Option<reqwest::header::HeaderMap>,
-    ) -> reqwest::Client {
-        let mut builder = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs_f64(timeout.connect))
-            .timeout(std::time::Duration::from_secs_f64(timeout.request));
-        if let Some(headers) = default_headers {
-            builder = builder.default_headers(headers);
-        }
-        builder.build().expect("Failed to build HTTP client")
     }
 
     /// Build common HTTP headers for Gemini API requests.
@@ -401,10 +379,7 @@ impl GeminiAdapterBuilder {
         GeminiAdapter {
             api_key: self.api_key,
             base_url,
-            http_client: GeminiAdapter::build_http_client_with_headers(
-                &timeout,
-                self.default_headers,
-            ),
+            http_client: crate::util::http::build_http_client(&timeout, self.default_headers),
             tool_call_map: Mutex::new(HashMap::new()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
         }
@@ -987,19 +962,21 @@ pub(crate) fn parse_response(
     let input_tokens = usage_obj
         .and_then(|u| u.get("promptTokenCount"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+        .unwrap_or(0);
     let output_tokens = usage_obj
         .and_then(|u| u.get("candidatesTokenCount"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+        .unwrap_or(0);
     let reasoning_tokens = usage_obj
         .and_then(|u| u.get("thoughtsTokenCount"))
         .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
     let cache_read_tokens = usage_obj
         .and_then(|u| u.get("cachedContentTokenCount"))
         .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
 
     // M-11: Gemini does not expose a cache write token count in its API.
     // The `cachedContentTokenCount` field only reports cache *read* tokens.
@@ -1049,18 +1026,21 @@ pub(crate) fn parse_error(
         &["error", "message"],
         &["error", "status"],
     );
-
-    let retry_after = crate::util::http::parse_retry_after(headers);
-
-    let mut err = Error::from_http_status(status, error_message, "gemini", Some(body), retry_after);
-    err.error_code = error_code.clone();
+    let mut err = crate::util::http::build_provider_error(
+        status,
+        headers,
+        body,
+        "gemini",
+        error_message,
+        error_code,
+    );
 
     // F-5: Override ErrorKind based on gRPC status codes (spec §6.4)
     // GAP-3: All 8 spec-required gRPC codes mapped.
     //
     // Important: gRPC code mapping runs first, then message-based reclassification
     // can further refine (e.g. INVALID_ARGUMENT + "API key not valid" → Authentication).
-    if let Some(ref code) = error_code {
+    if let Some(ref code) = err.error_code {
         match code.as_str() {
             "DEADLINE_EXCEEDED" => err.kind = ErrorKind::RequestTimeout,
             "PERMISSION_DENIED" => err.kind = ErrorKind::AccessDenied,
@@ -1357,19 +1337,21 @@ impl GeminiStreamTranslator {
             let input_tokens = usage_obj
                 .and_then(|u| u.get("promptTokenCount"))
                 .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
+                .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+                .unwrap_or(0);
             let output_tokens = usage_obj
                 .and_then(|u| u.get("candidatesTokenCount"))
                 .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
+                .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+                .unwrap_or(0);
             let reasoning_tokens = usage_obj
                 .and_then(|u| u.get("thoughtsTokenCount"))
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u32);
+                .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
             let cache_read_tokens = usage_obj
                 .and_then(|u| u.get("cachedContentTokenCount"))
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u32);
+                .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
 
             // M-11: Gemini does not expose cache write tokens (see parse_response comment).
             let cache_write_tokens: Option<u32> = None;

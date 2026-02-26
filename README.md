@@ -1,7 +1,8 @@
 # unified-llm-client-rust
 
-A unified LLM client library in Rust. Provides a single async interface across
-OpenAI, Anthropic, Gemini, and OpenAI-compatible endpoints. Built against the
+A unified LLM client library in Rust (~12K lines of production code, ~24K lines
+of tests). Provides a single async interface across OpenAI, Anthropic, Gemini,
+and OpenAI-compatible endpoints. Built against the
 [unified-llm-spec.md](https://github.com/strongdm/attractor/blob/main/unified-llm-spec.md)
 natural language specification from [strongdm/attractor](https://github.com/strongdm/attractor).
 

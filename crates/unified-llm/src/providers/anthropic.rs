@@ -44,7 +44,7 @@ impl AnthropicAdapter {
             api_key,
             base_url: DEFAULT_BASE_URL.to_string(),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
-            http_client: Self::build_http_client(&timeout),
+            http_client: crate::util::http::build_http_client(&timeout, None),
         }
     }
 
@@ -57,7 +57,7 @@ impl AnthropicAdapter {
             api_key,
             base_url: crate::util::normalize_base_url(&base_url.into()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
-            http_client: Self::build_http_client(&timeout),
+            http_client: crate::util::http::build_http_client(&timeout, None),
         }
     }
 
@@ -67,7 +67,7 @@ impl AnthropicAdapter {
             api_key,
             base_url: DEFAULT_BASE_URL.to_string(),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
-            http_client: Self::build_http_client(&timeout),
+            http_client: crate::util::http::build_http_client(&timeout, None),
         }
     }
 
@@ -81,7 +81,7 @@ impl AnthropicAdapter {
             api_key,
             base_url: crate::util::normalize_base_url(&base_url.into()),
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
-            http_client: Self::build_http_client(&timeout),
+            http_client: crate::util::http::build_http_client(&timeout, None),
         }
     }
 
@@ -95,33 +95,6 @@ impl AnthropicAdapter {
     /// Create a builder for fine-grained configuration.
     pub fn builder(api_key: SecretString) -> AnthropicAdapterBuilder {
         AnthropicAdapterBuilder::new(api_key)
-    }
-
-    /// Build an HTTP client with the given timeout configuration and optional default headers.
-    ///
-    /// Wires `connect` → `connect_timeout()` and `request` → `timeout()`.
-    /// Note: `stream_read` requires a custom per-chunk timeout implementation
-    /// (e.g., tokio timeout on individual chunk reads) and is not wired here.
-    fn build_http_client(timeout: &AdapterTimeout) -> reqwest::Client {
-        Self::build_http_client_with_headers(timeout, None)
-    }
-
-    fn build_http_client_with_headers(
-        timeout: &AdapterTimeout,
-        default_headers: Option<reqwest::header::HeaderMap>,
-    ) -> reqwest::Client {
-        let mut builder = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs_f64(timeout.connect))
-            .timeout(std::time::Duration::from_secs_f64(timeout.request));
-        if let Some(headers) = default_headers {
-            builder = builder.default_headers(headers);
-        }
-        // L-8: Return Result instead of panicking on client build failure
-        builder.build().unwrap_or_else(|e| {
-            tracing::error!("Failed to build HTTP client: {}", e);
-            // Fallback to default client — better than panicking in a library
-            reqwest::Client::new()
-        })
     }
 }
 
@@ -173,10 +146,7 @@ impl AnthropicAdapterBuilder {
             api_key: self.api_key,
             base_url,
             stream_read_timeout: std::time::Duration::from_secs_f64(timeout.stream_read),
-            http_client: AnthropicAdapter::build_http_client_with_headers(
-                &timeout,
-                self.default_headers,
-            ),
+            http_client: crate::util::http::build_http_client(&timeout, self.default_headers),
         }
     }
 }
@@ -479,15 +449,16 @@ impl StreamTranslator {
                         self.input_tokens = usage
                             .get("input_tokens")
                             .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32;
+                            .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+                            .unwrap_or(0);
                         self.cache_read_tokens = usage
                             .get("cache_read_input_tokens")
                             .and_then(|v| v.as_u64())
-                            .map(|v| v as u32);
+                            .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
                         self.cache_write_tokens = usage
                             .get("cache_creation_input_tokens")
                             .and_then(|v| v.as_u64())
-                            .map(|v| v as u32);
+                            .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
                     }
                 }
                 events.push(StreamEvent {
@@ -710,7 +681,8 @@ impl StreamTranslator {
                     self.output_tokens = usage
                         .get("output_tokens")
                         .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32;
+                        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+                        .unwrap_or(0);
                 }
             }
             "message_stop" => {
@@ -724,7 +696,7 @@ impl StreamTranslator {
                 // This is an APPROXIMATION based on thinking text character count / 4.
                 // Actual token counts may differ. Use for directional cost estimates only.
                 let reasoning_tokens = if self.thinking_text_length > 0 {
-                    Some((self.thinking_text_length / 4) as u32)
+                    Some(u32::try_from(self.thinking_text_length / 4).unwrap_or(u32::MAX))
                 } else {
                     None
                 };
@@ -1542,19 +1514,21 @@ pub(crate) fn parse_response(
     let input_tokens = usage_obj
         .and_then(|u| u.get("input_tokens"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+        .unwrap_or(0);
     let output_tokens = usage_obj
         .and_then(|u| u.get("output_tokens"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+        .unwrap_or(0);
     let cache_read_tokens = usage_obj
         .and_then(|u| u.get("cache_read_input_tokens"))
         .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
     let cache_write_tokens = usage_obj
         .and_then(|u| u.get("cache_creation_input_tokens"))
         .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
 
     // Estimate reasoning_tokens from thinking block text lengths (~4 chars per token)
     let reasoning_tokens: Option<u32> = {
@@ -1566,7 +1540,7 @@ pub(crate) fn parse_response(
             })
             .sum();
         if thinking_chars > 0 {
-            Some((thinking_chars / 4) as u32)
+            Some(u32::try_from(thinking_chars / 4).unwrap_or(u32::MAX))
         } else {
             None
         }
@@ -1744,13 +1718,14 @@ pub(crate) fn parse_error(
         &["error", "message"],
         &["error", "type"],
     );
-
-    let retry_after = crate::util::http::parse_retry_after(headers);
-
-    let mut err =
-        Error::from_http_status(status, error_message, "anthropic", Some(body), retry_after);
-    err.error_code = error_code;
-    err
+    crate::util::http::build_provider_error(
+        status,
+        headers,
+        body,
+        "anthropic",
+        error_message,
+        error_code,
+    )
 }
 
 #[cfg(test)]
